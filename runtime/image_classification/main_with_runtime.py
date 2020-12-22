@@ -25,9 +25,10 @@ import torchvision.datasets as datasets
 sys.path.append("..")
 import runtime
 import sgd
+torch.autograd.set_detect_anomaly(True)
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('--data_dir', type=str,
+parser.add_argument('--data-dir', type=str,
                     help='path to dataset')
 parser.add_argument('--distributed_backend', type=str,
                     help='distributed backend to use (gloo|nccl)')
@@ -64,7 +65,7 @@ parser.add_argument('--master_addr', default=None, type=str,
 parser.add_argument('--config_path', default=None, type=str,
                     help="Path of configuration file")
 parser.add_argument('--no_input_pipelining', action='store_true',
-                    help="No pipelining of inputs")
+                    help="No pipelining of inputs",default=False)
 parser.add_argument('--rank', default=None, type=int,
                     help="Rank of worker")
 parser.add_argument('--local_rank', default=0, type=int,
@@ -92,6 +93,9 @@ parser.add_argument('--recompute', action='store_true',
 # by not applying updates every minibatch.
 parser.add_argument('--macrobatch', action='store_true',
                     help='Macrobatch updates to save memory')
+parser.add_argument('--dataset-name', default='ImageNet', type=str,
+                    help='distributed backend')
+
 
 best_prec1 = 0
 
@@ -103,15 +107,23 @@ def is_first_stage():
 def is_last_stage():
     return args.stage is None or (args.stage == (args.num_stages-1))
 
+
+def print_msg(rank, msg):
+    print("Rank {} - {}".format(rank, msg))
+
 # Synthetic Dataset class.
-class SyntheticDataset(torch.utils.data.dataset.Dataset):
+class SyntheticDataset(torch.utils.data.dataset.Dataset): # made changes due to numerical instability
     def __init__(self, input_size, length, num_classes=1000):
-        self.tensor = Variable(torch.rand(*input_size)).type(torch.FloatTensor)
-        self.target = torch.Tensor(1).random_(0, num_classes)[0].type(torch.LongTensor)
+        self.input_size = input_size 
+        self.num_classes = num_classes
         self.length = length
 
     def __getitem__(self, index):
-        return self.tensor, self.target
+        input_size, num_classes = self.input_size, self.num_classes
+        tensor = Variable(torch.rand(*input_size)).type(torch.FloatTensor)
+        target = torch.Tensor(1).random_(0, num_classes)[0].type(torch.LongTensor)
+        
+        return tensor, target
 
     def __len__(self):
         return self.length
@@ -119,9 +131,10 @@ class SyntheticDataset(torch.utils.data.dataset.Dataset):
 def main():
     global args, best_prec1
     args = parser.parse_args()
-
+    print("initialising device...")
     torch.cuda.set_device(args.local_rank)
-
+    print("local rank {} device {}".format(args.local_rank, torch.cuda.current_device()))
+    args.rank = args.local_rank # my change
     # define loss function (criterion)
     criterion = nn.CrossEntropyLoss()
 
@@ -129,12 +142,22 @@ def main():
     module = importlib.import_module(args.module)
     args.arch = module.arch()
     model = module.model(criterion)
+    print("Local rank {} imported module".format(args.local_rank))
 
     # determine shapes of all tensors in passed-in model
-    if args.arch == 'inception_v3':
-        input_size = [args.batch_size, 3, 299, 299]
+    
+    if args.dataset_name == "ImageNet":
+        if args.arch == 'inception_v3':
+            input_size = [args.batch_size, 3, 299, 299]
+        else:
+            input_size = [args.batch_size, 3, 224, 224]
+    elif args.dataset_name == "MNIST":
+        input_size = [args.batch_size, 1, 28, 28]
+    elif args.dataset_name == "CIFAR10":
+        input_size = [args.batch_size, 3, 32, 32]
     else:
-        input_size = [args.batch_size, 3, 224, 224]
+        print("Dataset {} not supported".format(args.dataset_name))
+
     training_tensor_shapes = {"input0": input_size, "target": [args.batch_size]}
     dtypes = {"input0": torch.int64, "target": torch.int64}
     inputs_module_destinations = {"input": 0}
@@ -153,7 +176,7 @@ def main():
                                          list(output_tensors)):
             training_tensor_shapes[output] = list(output_tensor.size())
             dtypes[output] = output_tensor.dtype
-
+    print("local rank {} finished 1 forward pass...".format(args.local_rank))
     eval_tensor_shapes = {}
     for key in training_tensor_shapes:
         eval_tensor_shapes[key] = tuple(
@@ -174,6 +197,7 @@ def main():
             int(k): v for (k, v) in configuration_maps['stage_to_rank_map'].items()}
         configuration_maps['stage_to_depth_map'] = json_config_file.get("stage_to_depth_map", None)
 
+    print("Local rank {} Staging runtime....".format(args.local_rank))
     r = runtime.StageRuntime(
         model=model, distributed_backend=args.distributed_backend,
         fp16=args.fp16, loss_scale=args.loss_scale,
@@ -219,6 +243,8 @@ def main():
         print("=> loaded checkpoint '{}' (epoch {})"
                 .format(checkpoint_file_path, checkpoint['epoch']))
 
+    #print_msg(args.rank, "number of versions" + str(num_versions) )
+
     optimizer = sgd.SGDWithWeightStashing(r.modules(), r.master_parameters,
                                           r.model_parameters, args.loss_scale,
                                           num_versions=num_versions,
@@ -227,6 +253,7 @@ def main():
                                           weight_decay=args.weight_decay,
                                           verbose_freq=args.verbose_frequency,
                                           macrobatch=args.macrobatch)
+    
 
     if args.resume:
         optimizer.load_state_dict(checkpoint['optimizer'])
@@ -236,44 +263,70 @@ def main():
     # Data loading code
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
-
-    if args.arch == 'inception_v3':
-        if args.synthetic_data:
-            train_dataset = SyntheticDataset((3, 299, 299), 10000)
+    print(args.dataset_name)
+    
+    if args.dataset_name == "ImageNet":
+        if args.arch == 'inception_v3':
+            if args.synthetic_data:
+                train_dataset = SyntheticDataset((3, 299, 299), 10000)
+            else:
+                traindir = os.path.join(args.data_dir, 'train')
+                train_dataset = datasets.ImageFolder(
+                    traindir,
+                    transforms.Compose([
+                        transforms.RandomResizedCrop(299),
+                        transforms.ToTensor(),
+                        normalize,
+                    ])
+                )
         else:
-            traindir = os.path.join(args.data_dir, 'train')
-            train_dataset = datasets.ImageFolder(
-                traindir,
-                transforms.Compose([
-                    transforms.RandomResizedCrop(299),
-                    transforms.ToTensor(),
-                    normalize,
-                ])
-            )
-    else:
-        if args.synthetic_data:
-            train_dataset = SyntheticDataset((3, 224, 224), 1000000)
-        else:
-            traindir = os.path.join(args.data_dir, 'train')
-            train_dataset = datasets.ImageFolder(
-                traindir,
-                transforms.Compose([
-                    transforms.RandomResizedCrop(224),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    normalize,
-                ]))
+            print("Initialising dataset..")
+            if args.synthetic_data:
+                train_dataset = SyntheticDataset((3, 224, 224),  1281168 ) #modified
+            else:
+                traindir = os.path.join(args.data_dir, 'train')
+                train_dataset = datasets.ImageFolder(
+                    traindir,
+                    transforms.Compose([
+                        transforms.RandomResizedCrop(224),
+                        transforms.RandomHorizontalFlip(),
+                        transforms.ToTensor(),
+                        normalize,
+                    ]))
 
-    if args.synthetic_data:
-        val_dataset = SyntheticDataset((3, 224, 224), 10000)
-    else:
-        valdir = os.path.join(args.data_dir, 'val')
-        val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+        if args.synthetic_data:
+            val_dataset = SyntheticDataset((3, 224, 224), 10000)
+        else:
+            valdir = os.path.join(args.data_dir, 'val')
+            val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                normalize,
+            ]))
+    
+    elif args.dataset_name == "MNIST":
+        train_dataset = datasets.MNIST(
+            args.data_dir,
+            download=True,
+            train=True,
+            transform=transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    (0.1307,), (0.3081,)),
+            ]))
+
+        val_dataset = datasets.MNIST(args.data_dir, download=True,
+                                                    train=False,
+                                                    transform=transforms.Compose([
+                                                    transforms.ToTensor(),  # first, convert image to PyTorch tensor
+                                                    transforms.Normalize(
+                                                        (0.1307,), (0.3081,))
+                                                ]))
+    elif args.dataset_name == "CIFAR10":
+        transform = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+        train_dataset = datasets.CIFAR10(root=args.data_dir, train=True, transform =transform)
+        val_dataset = datasets.CIFAR10(root=args.data_dir, train=False, transform =transform)
 
     distributed_sampler = False
     train_sampler = None
@@ -356,6 +409,8 @@ def train(train_loader, r, optimizer, epoch):
         print("Letting in %d warm-up minibatches" % num_warmup_minibatches)
         print("Running training for %d minibatches" % n)
 
+    print("warmup minibatches = ", num_warmup_minibatches)
+
     # start num_warmup_minibatches forward passes
     for i in range(num_warmup_minibatches):
         r.run_forward()
@@ -379,7 +434,7 @@ def train(train_loader, r, optimizer, epoch):
             batch_time.update(time.time() - end)
             end = time.time()
             epoch_time = (end - epoch_start_time) / 3600.0
-            full_epoch_time = (epoch_time / float(i+1)) * float(n)
+            full_epoch_time = (epoch_time / (float(i+1)+num_warmup_minibatches)) * float(n) #changed
 
             if i % args.print_freq == 0:
                 print('Epoch: [{0}][{1}/{2}]\t'
@@ -396,19 +451,26 @@ def train(train_loader, r, optimizer, epoch):
                        cached_memory=(float(torch.cuda.memory_cached()) / 10**9)))
                 import sys; sys.stdout.flush()
         else:
-            if i % args.print_freq == 0:
-                print('Epoch: [{0}][{1}/{2}]\tMemory: {memory:.3f} ({cached_memory:.3f})'.format(
-                       epoch, i, n, memory=(float(torch.cuda.memory_allocated()) / 10**9),
-                       cached_memory=(float(torch.cuda.memory_cached()) / 10**9)))
-                import sys; sys.stdout.flush()
+            pass
+            # if i % args.print_freq == 0:
+            #     print('Epoch: [{0}][{1}/{2}]\tMemory: {memory:.3f} ({cached_memory:.3f})'.format(
+            #            epoch, i, n, memory=(float(torch.cuda.memory_allocated()) / 10**9),
+            #            cached_memory=(float(torch.cuda.memory_cached()) / 10**9)))
+                # import sys; sys.stdout.flush()
 
         # perform backward pass
         if args.fp16:
             r.zero_grad()
         else:
             optimizer.zero_grad()
+        
+        
         optimizer.load_old_params()
-        r.run_backward()
+        try:
+            r.run_backward()
+        except Exception as e:
+            print_msg(args.rank, "Failed backward pass of batch {}".format(i)+"\n"+str(e))
+            exit()
         optimizer.load_new_params()
         optimizer.step()
 
@@ -559,9 +621,9 @@ def adjust_learning_rate(optimizer, epoch, total_epochs, r, lr_policy, step, epo
     if step % 100 == 0:
         print("Epoch: %d Step %d \tLearning rate: %f" % (epoch, step, lr))
 
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
+    # for param_group in optimizer.param_groups:
+    #     param_group['lr'] = lr
+    optimizer.base_optimizer.update_lr(lr) #changed
 
 def accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
@@ -575,7 +637,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 

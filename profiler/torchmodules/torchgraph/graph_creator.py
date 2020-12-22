@@ -250,7 +250,7 @@ class GraphCreator(object):
             sub_module_name = sub_module.__class__.__name__
             sub_sub_modules = sub_module.__dict__['_modules']
             if len(sub_sub_modules) == 0 or sub_module_name in self.module_whitelist:
-                sub_module.reset_hooks()
+                # sub_module.reset_hooks()
                 #
                 # Hook nn.Module with no descendants.
                 #
@@ -278,4 +278,5 @@ class GraphCreator(object):
         self.graph.to_dot(os.path.join(directory, "graph.dot"))
         with open(os.path.join(directory, "graph.txt"), 'w') as f:
             f.write(str(self.graph))
-        self.graph.render_bar_graphs_and_cdfs(directory)
+        ### I have disabled this because of failing to meet the latex dependency 
+        # self.graph.render_bar_graphs_and_cdfs(directory)

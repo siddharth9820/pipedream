@@ -126,7 +126,7 @@ class StageRuntime:
             self.num_warmup_minibatches = 0
             self.comm_handler = None
         else:
-            assert len(module_to_stage_map) == len(model)
+            assert len(module_to_stage_map) == len(model), "{} {}".format(module_to_stage_map, model)
             assert self.rank is not None
 
             stage_to_module_map = collections.defaultdict(list)
@@ -663,7 +663,7 @@ class StageRuntime:
         """
         if self.stage == 0 or self.stage is None:
             return loader_size
-
+        # print("in num_iterations loader_size {} ranks in first stage {}".format(loader_size, self.num_ranks_in_first_stage))
         num_iterations = loader_size * self.num_ranks_in_first_stage
         assert num_iterations % self.num_ranks_in_stage == 0
         num_iterations = num_iterations // self.num_ranks_in_stage

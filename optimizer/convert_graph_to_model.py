@@ -119,8 +119,11 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
         layer_call = None
         layer_name = "self.layer%d" % counter
         output_name = "out%d" % counter
-        layer_declaration = "torch.nn.%s" % (
-            node.node_desc.replace("inplace", "inplace=True"))
+        # layer_declaration = "torch.nn.%s" % (
+        #     node.node_desc.replace("inplace", "inplace=True"))
+        if "ReLU" in node.node_desc:
+            node.node_desc = "ReLU(inplace=False)"
+        layer_declaration = "torch.nn.%s" % (node.node_desc)
         layer_names[node.node_id] = layer_name
         if node.node_id not in output_names:
             output_names[node.node_id] = output_name
@@ -472,7 +475,7 @@ if __name__ == '__main__':
     model = []
     import_statements = ["from .%s import %s" % (args.arch, args.model_name)]
     pytorch_modules = None
-    if len(subgraphs) > 1:
+    if len(subgraphs) > 1: 
         python_modules, pytorch_modules, subgraph_inputs, subgraph_outputs = \
             fuse_subgraphs_to_module(full_graph, subgraphs, args.model_name,
                                      initialize_weights,
@@ -507,8 +510,11 @@ if __name__ == '__main__':
 
     if args.stage_to_num_ranks_map is not None:
         stage_to_num_ranks_map = args.stage_to_num_ranks_map.split(",")
+        print(stage_to_num_ranks_map)
         stage_to_num_ranks_map = [(int(x.split(":")[0]), int(x.split(":")[1]))
                       for x in stage_to_num_ranks_map]
+        print(stage_to_num_ranks_map)
+        print(pytorch_modules)
         num_stages = 0
         for (stage_id, replication_factor) in stage_to_num_ranks_map:
             num_stages += replication_factor

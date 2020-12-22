@@ -3,6 +3,7 @@
 
 import torch.optim
 import time
+import copy
 
 from collections import deque  # Efficient ring buffer implementation.
 
@@ -15,6 +16,31 @@ class Version:
 
     def incr(self):
         return Version(version=self.version+1)
+
+class SGD_Base(object):
+    def __init__(self, parameters, learning_rate):
+        self.parameters = parameters 
+        self.learning_rate = learning_rate 
+    
+    def step(self):
+        for param in self.parameters:
+            param.data -= self.learning_rate * param.grad.data
+
+    def update_lr(self, new_lr):
+        self.learning_rate = new_lr
+    
+    def zero_grad(self):
+        for param in self.parameters:
+            if param.grad != None:
+                param.grad.zero_()
+
+    def average_grad(self, update_interval):
+        for param in self.parameters:
+            if param.grad != None:
+                param.grad /= update_interval
+        
+
+
 
 class OptimizerWithWeightStashing(torch.optim.Optimizer):
     """Wrapper class that adds weight stashing to a vanilla torch.optim.Optimizer.
@@ -32,13 +58,16 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
         self.master_parameters = master_parameters
         self.model_parameters = model_parameters  # model_parameters is None if not fp16.
         self.loss_scale = loss_scale
+        self.lr = 1e-3
 
         # Only need at most 2 versions if using macrobatching.
         if macrobatch:
             num_versions = min(2, num_versions)
         self.num_versions = num_versions
-        self.base_optimizer = getattr(torch.optim, optim_name)(
-            master_parameters, **optimizer_args)
+        # self.base_optimizer = getattr(torch.optim, optim_name)(
+        #     master_parameters, **optimizer_args)
+        self.base_optimizer = SGD_Base(master_parameters, self.lr)
+        
         self.latest_version = Version()
         self.current_version = Version()
         self.initialize_queue()
@@ -92,9 +121,10 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
                 # accumulate normally.
                 # mask might have a different shape, so don't copy it to
                 # the module this way.
-                if "running_" in key or "mask" in key:
-                    state_dict[key] = cur_state_dict[key]
-            module.load_state_dict(state_dict)
+                if "running_" in key or "mask" in key: #added
+                    state_dict[key] = cur_state_dict[key] #added
+                cur_state_dict[key].data = state_dict[key].data #added
+            # module.load_state_dict(state_dict) #comment out
 
             # Load the mask.
             for key in state_dict:
@@ -144,11 +174,16 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
                 for parameter in self.master_parameters:
                     parameter.grad.data = parameter.grad.data / self.loss_scale
 
-        for p in self.param_groups[0]['params']:
-            if p.grad is not None:
-                p.grad.div_(self.update_interval)
+        # for p in self.param_groups[0]['params']:
+        #     if p.grad is not None:
+        #         p.grad.div_(self.update_interval)
 
-        loss = self.base_optimizer.step()
+        # loss = self.base_optimizer.step()
+
+        self.base_optimizer.average_grad(self.update_interval)
+
+        self.base_optimizer.step()
+
         if self.model_parameters is not None:
             import apex.fp16_utils as fp16_utils
             fp16_utils.master_params_to_model_params(self.model_parameters,
@@ -161,4 +196,7 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
         if log_timing:
             print("Optimizer step took: %.3f" % (time.time() - start_time))
         self.batch_counter += 1
-        return loss
+        
+        # return loss
+
+

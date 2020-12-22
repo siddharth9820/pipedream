@@ -7,6 +7,7 @@ from torch.autograd import Variable
 
 from collections import OrderedDict
 
+summary_ = []
 
 def hook_modules(register_fn, module, module_whitelist):
     sub_modules = module.__dict__['_modules']
@@ -31,33 +32,33 @@ def summary(model, module_whitelist, model_input, verbose, device="cuda"):
     mapping = {}
     def register_hook(module):
         def hook(module, input, output):
+            global summary_
             class_name = str(module.__class__).split('.')[-1].split("'")[0]
-            module_idx = len(summary)
-
-            summary.append(OrderedDict())
-            summary[-1]['layer_name'] = module
-            summary[-1]['input_shape'] = list(input[0].size())
+            module_idx = len(summary_)
+            summary_.append(OrderedDict())
+            summary_[-1]['layer_name'] = module
+            summary_[-1]['input_shape'] = list(input[0].size())
             if isinstance(output, (list,tuple)):
-                summary[-1]['output_shape'] = []
+                summary_[-1]['output_shape'] = []
                 for o in output:
                     if isinstance(o, (list,tuple)):
-                        summary[-1]['output_shape'].extend(
+                        summary_[-1]['output_shape'].extend(
                             [list(o_elem.size()) for o_elem in o])
                     else:
-                        summary[-1]['output_shape'].append(list(o.size()))
+                        summary_[-1]['output_shape'].append(list(o.size()))
             else:
-                summary[-1]['output_shape'] = list(output.size())
+                summary_[-1]['output_shape'] = list(output.size())
 
             params = 0
             for name, param in module.named_parameters():
                 if 'weight' in name:
                     params += torch.prod(torch.LongTensor(list(param.size())))
-                    summary[-1]['trainable'] = param.requires_grad
+                    summary_[-1]['trainable'] = param.requires_grad
                 elif 'bias' in name:
                     params += torch.prod(torch.LongTensor(list(param.size())))
-            summary[-1]['nb_params'] = params
-            summary[-1]['forward_time'] = 0.0
-            summary[-1]['backward_time'] = 0.0
+            summary_[-1]['nb_params'] = params
+            summary_[-1]['forward_time'] = 0.0
+            summary_[-1]['backward_time'] = 0.0
 
         hooks.append(module.register_forward_hook(hook))
                 
@@ -69,12 +70,18 @@ def summary(model, module_whitelist, model_input, verbose, device="cuda"):
     else:
         dtype = torch.FloatTensor
 
-    summary = []
+    
     hooks = []
     # register hook
     hook_modules(register_hook, model, module_whitelist)
-    # make a forward pass
-    model(*model_input)
+    global summary_
+   
+     # make a forward pass
+    with torch.no_grad():
+        model(*model_input)
+    
+    print(model.__dict__['_modules'])
+
     # remove these hooks
     for h in hooks:
         h.remove()
@@ -86,13 +93,13 @@ def summary(model, module_whitelist, model_input, verbose, device="cuda"):
         print('================================================================')
     total_params = 0
     trainable_params = 0
-    for layer_id in range(len(summary)):
+    for layer_id in range(len(summary_)):
         # input_shape, output_shape, trainable, nb_params
-        line_new = '%s\t%s\t%s' % (summary[layer_id]['layer_name'], str(summary[layer_id]['output_shape']), '{0:,}'.format(summary[layer_id]['nb_params']))
-        total_params += summary[layer_id]['nb_params']
-        if 'trainable' in summary[layer_id]:
-            if summary[layer_id]['trainable'] == True:
-                trainable_params += summary[layer_id]['nb_params']
+        line_new = '%s\t%s\t%s' % (summary_[layer_id]['layer_name'], str(summary_[layer_id]['output_shape']), '{0:,}'.format(summary_[layer_id]['nb_params']))
+        total_params += summary_[layer_id]['nb_params']
+        if 'trainable' in summary_[layer_id]:
+            if summary_[layer_id]['trainable'] == True:
+                trainable_params += summary_[layer_id]['nb_params']
         if verbose:
             print(line_new)
     if verbose:
@@ -102,4 +109,4 @@ def summary(model, module_whitelist, model_input, verbose, device="cuda"):
         print('Non-trainable params: {0:,}'.format(total_params - trainable_params))
         print('----------------------------------------------------------------')
 
-    return summary
+    return summary_

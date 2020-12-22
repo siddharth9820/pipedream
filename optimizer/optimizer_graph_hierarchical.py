@@ -13,6 +13,7 @@ import sys
 sys.path.append("..")
 import graph
 import utils
+import json
 
 def compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                          output_activation_sizes, all_predecessor_ids,
@@ -188,7 +189,7 @@ def analyze_partitioning(A, states, start, end, network_bandwidth, num_machines,
         prev_split = splits[i]
     if print_configuration:
         print()
-    return splits[:-1]
+    return splits[:-1], replication_factors
 
 def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
          straight_pipeline, use_memory_constraint, use_fewer_machines,
@@ -282,7 +283,7 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
     for num_machines, network_bandwidth in zip(all_num_machines, network_bandwidths):
         print("Solving optimization problem with %d machines with inter-machine bandwidth of %.2f GB/s" % (num_machines, network_bandwidth / 10**9))
         import numpy as np
-        print(np.array(compute_times))
+        #print(np.array(compute_times))
         A = compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                                  output_activation_sizes, all_predecessor_ids,
                                  num_machines, num_machines_in_machine,
@@ -294,10 +295,20 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
                 compute_times[i][j] = A[i][j][-1][0]
         counter += 1
         all_As.append(A)
-    print(np.array(compute_times))
+    #print(np.array(compute_times))
+
+    charm_nn_config = {}
+    for i,state in enumerate(states):
+        assert len(state.antichain) == 1
+        node = state.antichain[0]
+        node_desc = gr.nodes[node].node_desc
+        #print(node_desc)
+        charm_nn_config[i] = node_desc
 
     splits = [(0, len(states))]
     i = len(all_As) - 1
+    stage_to_num_ranks_map = {}
+    layer_to_stage_map = {}
     while i >= 0:
         print("======================================")
         print("Level %d" % (i+1))
@@ -305,7 +316,7 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         new_splits = []
         stage_id = 0
         for (start, end) in splits:
-            partial_splits = \
+            partial_splits, replication_factors = \
                 analyze_partitioning(all_As[i], states, start, end,
                                      network_bandwidths[i], all_num_machines[i],
                                      activation_compression_ratio,
@@ -318,15 +329,23 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
                     for predecessor in predecessors:
                         if predecessor.stage_id is None:
                             predecessor.set_stage_id(stage_id)
+                    stage_to_num_ranks_map[stage_id] = replication_factors[stage_id]
+                    for layer_no in range(start_point, split):
+                        layer_to_stage_map[layer_no] = stage_id
                 start_point = split
                 stage_id += 1
+            
             new_splits.append((start_point, end))
             if i == 0:
                 predecessors = gr.all_predecessors(states[end-1].antichain)
                 for predecessor in predecessors:
                     if predecessor.stage_id is None:
                         predecessor.set_stage_id(stage_id)
+                stage_to_num_ranks_map[stage_id] = replication_factors[stage_id]
+                for layer_no in range(start_point, end):
+                        layer_to_stage_map[layer_no] = stage_id
             stage_id += 1
+            print("Replication factors = ", stage_to_num_ranks_map)
         print("Total number of stages: %d" % stage_id)
         splits = new_splits
         i -= 1
@@ -340,10 +359,30 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         total_num_machines = 1
         for num_machines in all_num_machines:
             total_num_machines *= num_machines
-        gr.to_dot(os.path.join(output_directory, "gpus=%d" % total_num_machines))
+        #"Commented out because not working"
+        # gr.to_dot(os.path.join(output_directory, "gpus=%d" % total_num_machines))
         gr_str = str(gr)
         with open(os.path.join(output_directory, "gpus=%d.txt" % total_num_machines), 'w') as f:
             f.write(gr_str)
+        
+        str_map = ""
+        for stage, repl_factor in stage_to_num_ranks_map.items():
+            if len(str_map) == 0:
+                str_map += str(stage)+":"+str(repl_factor)
+            else:
+                str_map += ","+str(stage)+":"+str(repl_factor)
+
+        print(str_map)
+        with open(os.path.join(output_directory, "stage_to_num_ranks_map.txt" ), 'w') as f:
+            f.write(str_map)
+        
+        with open(os.path.join(output_directory, "charm_nn_config.json"), "w") as f:
+            json.dump(charm_nn_config, f, indent=2) 
+        
+        with open(os.path.join(output_directory, "layer_to_stage_map.json"), "w") as f:
+            json.dump(layer_to_stage_map, f, indent=2)
+        
+        print(layer_to_stage_map)
 
     total_time = states[-1].compute_time
     total_parameter_size = states[-1].parameter_size

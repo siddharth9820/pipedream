@@ -8,6 +8,23 @@ from torch.autograd import Function
 
 import time
 
+
+def is_parameterless(layer):
+    return not list(layer.parameters())
+
+def make_pre_hook_bw(module_obj, profiler_obj):
+    def hook(grad):
+        profiler_obj.record['backward'].append(
+            (module_obj, time.time(), os.getpid()))
+    return hook
+
+def none_grad(layer):
+    for name, param in layer.named_parameters():
+        if param.grad != None:
+            del param.grad 
+            param.grad = None
+
+
 class Profiling(object):
     def __init__(self, model, module_whitelist):
         if isinstance(model, torch.nn.Module) is False:
@@ -119,7 +136,7 @@ class Profiling(object):
                 #
                 self.hook_modules(sub_module)
             else:
-                sub_module.reset_hooks()
+                # sub_module.reset_hooks()
                 #
                 # Hook nn.Module with no descendants.
                 #
@@ -127,17 +144,53 @@ class Profiling(object):
                 # Wrapper function to "forward", with timer to record how long
                 # forward pass takes.
                 def forward_wrapper(self, *input):
-                    start_time = time.time()
+                    assert(len(input) == 1) , "not suuporting lists or tuples.."
+                    name = self.__class__.__name__                       
+                    
+                    if is_parameterless(self) and name != "ReLU":
+                        input[0].requires_grad = True 
+                       
                     pid = os.getpid()
-                    result = this_profiler.forward_original_methods[self](*input)
+                    start_time = time.time()
+                   
+                    if name == "ReLU":
+                        with torch.no_grad():
+                            result = this_profiler.forward_original_methods[self](*input)
+                    else:
+                        result = this_profiler.forward_original_methods[self](
+                            *input)
+
+                    assert not isinstance(result, (list, tuple)), "not supporting lists and tuples.."
                     torch.cuda.synchronize()
                     stop_time = time.time()
 
                     if (this_profiler.profiling_on):
-                        global record
                         this_profiler.record['forward'].append((self, start_time, pid, stop_time))
-
-                    return result
+                    print("Forward of {} - Time {} seconds Mem {} ".format(self, stop_time-start_time, torch.cuda.memory_allocated()/(1000000000)))
+                    tot = stop_time - start_time
+                    
+                    if name != "ReLU":
+                        grad = torch.zeros_like(result).cuda()
+                        torch.cuda.synchronize()
+                        start_time = time.time()
+                        result.backward(grad)
+                        torch.cuda.synchronize()
+                        stop_time = time.time()
+                        del grad
+                    else:
+                        start_time = time.time()
+                        stop_time = start_time + tot 
+                    
+                    if (this_profiler.profiling_on):
+                        this_profiler.record['backward'].append(
+                                (self, start_time, pid, stop_time))
+                    print("Backward of {} - Time {} seconds Mem {}".format(self,
+                                                                   stop_time-start_time, torch.cuda.memory_allocated()/(1000000000)))
+                    # result.register_hook(make_pre_hook_bw(self, this_profiler))
+                    # none_grad(self)
+                    del input
+                                       
+                    return result.detach()
 
                 # Replace "forward" with "forward_wrapper".
                 if sub_module not in this_profiler.forward_original_methods:
@@ -147,25 +200,25 @@ class Profiling(object):
 
                 # Start timer for backward pass in pre_hook; then stop timer
                 # for backward pass in post_hook.
-                def backward_pre_hook(*args):
-                    if (this_profiler.profiling_on):
-                        this_profiler.record['backward'].append((args[0], time.time(), os.getpid()))
+                # def backward_pre_hook(*args):
+                #     if (this_profiler.profiling_on):
+                #         this_profiler.record['backward'].append((args[0], time.time(), os.getpid()))
 
-                def backward_post_hook(*args):
-                    idx = -1
-                    if not this_profiler.profiling_on:
-                        return
-                    while args[0] != this_profiler.record['backward'][idx][0]:
-                        idx -= 1
-                        if (-idx) == len(this_profiler.record['backward']):
-                            return
-                    torch.cuda.synchronize()
-                    this_profiler.record['backward'][idx] = (this_profiler.record['backward'][idx][0],
-                                                             this_profiler.record['backward'][idx][1],
-                                                             this_profiler.record['backward'][idx][2],
-                                                             time.time())
-                sub_module.register_backward_pre_hook(backward_pre_hook)
-                sub_module.register_backward_hook(backward_post_hook)
+                # def backward_post_hook(*args):
+                #     idx = -1
+                #     if not this_profiler.profiling_on:
+                #         return
+                #     while args[0] != this_profiler.record['backward'][idx][0]:
+                #         idx -= 1
+                #         if (-idx) == len(this_profiler.record['backward']):
+                #             return
+                #     torch.cuda.synchronize()
+                #     this_profiler.record['backward'][idx] = (this_profiler.record['backward'][idx][0],
+                #                                              this_profiler.record['backward'][idx][1],
+                #                                              this_profiler.record['backward'][idx][2],
+                #                                              time.time())
+                # # sub_module.register_backward_pre_hook(backward_pre_hook)
+                # sub_module.register_backward_hook(backward_post_hook)
 
     def unhook_modules(self, module):
         sub_modules = module.__dict__['_modules']
@@ -183,5 +236,5 @@ class Profiling(object):
                 #
                 self.unhook_modules(sub_module)
             else:
-                sub_module.reset_hooks()
+                # sub_module.reset_hooks()
                 sub_module.forward = self.forward_original_methods[sub_module]
