@@ -39,7 +39,6 @@ import models
 # import models.lenet as lenet
 
 import gc
-
 print(models.__file__)
 
 def print_gpu_tensors():
