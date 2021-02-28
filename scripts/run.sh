@@ -14,8 +14,8 @@ do
 done
 
 PIPEDREAM_HOME="/cfarhomes/ssingh37/pipedream"
-BATCH_SIZE=64
-RUN_PROFILE=1
+BATCH_SIZE=32
+RUN_PROFILE=0
 RUN_OPTIM=1
 if [ -z ${DATASET_DIR+x} ]; then SYNTHETIC_DATA=1; else SYNTHETIC_DATA=0; fi
 
@@ -33,16 +33,15 @@ if [ $RUN_PROFILE -eq 1 ];then
         mkdir -p $PROFILE_OUTPUT_DIR
     fi 
     
-    if [ $SYNTHETIC_DATA -eq 1 ];then
-        echo "Using Synthetic Data.."
-        python -u main_corrected.py -a $ARCH -b $BATCH_SIZE -s -v \
-                                                        --profile_directory $PROFILE_OUTPUT_DIR 
-                                                        
-    else
-        echo "Using $DATASET_NAME with $ARCH" 
-        python -u main_corrected.py -a $ARCH -b $BATCH_SIZE --data_dir $DATASET_DIR -v \
-                                                        --profile_directory $PROFILE_OUTPUT_DIR --dataset-name $DATASET_NAME
-    fi
+    # if [ $SYNTHETIC_DATA -eq 1 ];then
+    echo "Using $DATASET_NAME with $ARCH"
+    python -u main_corrected.py -a $ARCH -b $BATCH_SIZE -s -v --profile_directory $PROFILE_OUTPUT_DIR --dataset-name $DATASET_NAME 
+                                                    
+    # else
+    #     echo "Using $DATASET_NAME with $ARCH" 
+    #     python -u main_corrected.py -a $ARCH -b $BATCH_SIZE --data_dir $DATASET_DIR -v \
+    #                                                     --profile_directory $PROFILE_OUTPUT_DIR --dataset-name $DATASET_NAME
+    # fi
 else 
     echo "Not Running Pipedream Profiler"
 fi
@@ -81,6 +80,7 @@ repl_factors=$(<./$DATASET_NAME/$ARCH/$NUM_GPUS/stage_to_num_ranks_map.txt)
 res="${repl_factors//[^:]}"
 num_stages="${#res}"
 
+
 # ## STEP 4 - Execute runtime
 cd $PIPEDREAM_HOME/runtime/image_classification
 
@@ -95,7 +95,7 @@ fi
 
 if [ $MODE -eq 1 ]; then 
     if [ $SYNTHETIC_DATA -eq 0 ];then
-        python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS main_with_runtime.py --master_addr localhost --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --num_ranks_in_server $NUM_GPUS --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR
+        python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS main_with_runtime.py --master_addr localhost --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --language_modelling --num_ranks_in_server $NUM_GPUS
     fi
 fi
 

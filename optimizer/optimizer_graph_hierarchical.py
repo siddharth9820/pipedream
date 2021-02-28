@@ -46,7 +46,7 @@ def compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                 if cum_compute_time is None:
                     A[i][j][m] = (None, None, None)
                 else:
-                    A[i][j][m] = (sum([cum_compute_time,
+                    A[i][j][m] = (max([cum_compute_time,
                                        data_parallel_communication_time]) / (m+1), None, (m+1))
 
     min_machines = 1
@@ -78,7 +78,7 @@ def compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                         stashed_data_size *= math.ceil((num_machines - (m+1)) / m_prime)
                         if use_memory_constraint and stashed_data_size > memory_size:
                             continue
-                        last_stage_time = sum([last_stage_time,
+                        last_stage_time = max([last_stage_time,
                                                ((4 * (m_prime - 1) *
                                                 last_stage_parameter_size) / (bandwidth * m_prime))])
                         last_stage_time /= m_prime
@@ -392,7 +392,7 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         data_parallel_communication_time = (
             (4 * (num_machines - 1) * total_parameter_size) /
             (network_bandwidth * num_machines)) / num_machines_in_machine
-        data_parallel_total_time = sum(
+        data_parallel_total_time = max(
             [data_parallel_total_time, data_parallel_communication_time]) / num_machines
         num_machines_in_machine = num_machines
     pipeline_parallel_total_time = A[0][len(states)-1][num_machines-1][0]

@@ -8,8 +8,10 @@ import subprocess
 import sys
 
 sys.path.append("..")
+sys.path.append("../profiler/image_classification")
 import graph
-
+import models.language_modelling.transformer as transformer_layers
+import torch
 
 declaration_whitelist = [
     "hidden",
@@ -90,7 +92,12 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
                                model_template_filename, output_filename):
     model_template = open(model_template_filename, 'r').read()
     nodes = graph.topological_sort()
-    import_statements = []
+    f = "../../profiler/image_classification/models/language_modelling"
+    import_statements = [
+        f"import sys \nsys.path.insert(0, \"{f}\")\nimport transformer as transformer_layers" 
+        
+        ]
+
     module_methods = []
 
     counter = 0
@@ -123,7 +130,15 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
         #     node.node_desc.replace("inplace", "inplace=True"))
         if "ReLU" in node.node_desc:
             node.node_desc = "ReLU(inplace=False)"
-        layer_declaration = "torch.nn.%s" % (node.node_desc)
+        if hasattr(torch.nn, node.node_desc[:node.node_desc.find('(')]):
+            layer_declaration = "torch.nn.%s" % (node.node_desc)
+        elif hasattr(transformer_layers, node.node_desc[:node.node_desc.find('(')]):
+            layer_declaration = "transformer_layers.%s" %(node.node_desc)
+        elif node.node_desc.startswith("Input"):
+            layer_declaration = "torch.nn.%s" % (node.node_desc)
+        else:
+            print(node.node_desc)
+            exit(-1)
         layer_names[node.node_id] = layer_name
         if node.node_id not in output_names:
             output_names[node.node_id] = output_name
@@ -216,7 +231,6 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
                found = True
         if not found:
             layer_names_and_declarations.append((layer_name, layer_declaration))
-
         if node.node_id in full_graph.in_edges:
             in_edges = full_graph.in_edges[node.node_id]
         else:
@@ -331,6 +345,7 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
     # module.
     layer_declarations_str = "\n        ".join([
         "%s = %s" % (x[0], x[1]) for x in layer_names_and_declarations])
+    
     if initialize_weights:
         layer_declarations_str += "\n        self._initialize_weights()"
         module_methods.append("""def _initialize_weights(self):
@@ -354,6 +369,7 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
                               "inputs": input_names,
                               "import_statements": "\n".join(import_statements),
                               "module_methods": "\n\n".join(module_methods)}
+  
     with open(output_filename, 'w') as f:
         f.write(model)
     return num_inputs, num_outputs

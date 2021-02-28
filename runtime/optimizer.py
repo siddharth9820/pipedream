@@ -24,7 +24,8 @@ class SGD_Base(object):
     
     def step(self):
         for param in self.parameters:
-            param.data -= self.learning_rate * param.grad.data
+            if param.grad is not None:
+                param.data -= self.learning_rate * param.grad.data
 
     def update_lr(self, new_lr):
         self.learning_rate = new_lr

@@ -136,7 +136,7 @@ best_prec1 = 0
 def create_graph(model, train_loader, summary, directory):
     """Given a model, creates and visualizes the computation DAG
        of the model in the passed-in directory."""
-    graph_creator = torchgraph.GraphCreator(model, summary, module_whitelist=[])
+    graph_creator = torchgraph.GraphCreator(model, summary, module_whitelist=['CombinedEmbedding', 'TransformerEncoderLayerWithMask', 'FinalFCLayer'])
     graph_creator.hook_modules(model)
     for i, (input, target) in enumerate(train_loader):
         input = input.cuda(non_blocking=True)
@@ -151,7 +151,20 @@ def create_graph(model, train_loader, summary, directory):
 def is_parameterless(layer):
     return not list(layer.parameters())
 
-class SyntheticDataset(torch.utils.data.dataset.Dataset):
+class SyntheticDatasetLanguageModelling(torch.utils.data.dataset.Dataset):
+    def __init__(self, vocab_size, bptt_len, length):
+        self.length = length 
+        sentence = torch.randint(low=0, high=vocab_size, size=(bptt_len,)).long()
+        self.src = sentence[:-1]
+        self.trg = sentence [1:]
+
+    def __getitem__(self, index):
+        return self.src, self.trg
+
+    def __len__(self):
+        return self.length
+
+class SyntheticDatasetImageClassification(torch.utils.data.dataset.Dataset):
     def __init__(self, input_size, length, num_classes=1000):
         self.tensor = Variable(torch.rand(*input_size)).type(torch.FloatTensor)
         self.target = torch.Tensor(1).random_(0, num_classes)[0].type(torch.LongTensor)
@@ -196,9 +209,9 @@ class ImageNet_util(object):
     def get_dataset(self, arch, data_dir=None):
         if not data_dir:
             if arch == 'inception_v3':
-                train_dataset = SyntheticDataset((3, 299, 299), 100)
+                train_dataset = SyntheticDatasetImageClassification((3, 299, 299), 100)
             else:
-                train_dataset = SyntheticDataset((3, 224, 224), 100)
+                train_dataset = SyntheticDatasetImageClassification((3, 224, 224), 100)
         else:
             traindir = os.path.join(data_dir, 'train')
             normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -233,11 +246,25 @@ class CIFAR10_util(object):
     
     def get_dataset(self, arch, data_dir=None):
         if not data_dir:
-            train_dataset = SyntheticDataset((3, 32, 32), 100)
+            train_dataset = SyntheticDatasetImageClassification((3, 32, 32), 100)
         else:
             transform = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
             train_dataset = datasets.CIFAR10(root=data_dir, train=True, transform =transform)
         return train_dataset
+
+class LM_util(object):
+    def __init__(self):
+        pass 
+
+    def get_model(self, arch):
+        import models.language_modelling.transformer as transformer
+        model = transformer.__dict__[arch]()
+        return model 
+
+    def get_dataset(self, arch, data_dir=None):
+        train_dataset = SyntheticDatasetLanguageModelling(50257, 256, 100)
+        return train_dataset
+
 
 def main():
     global args, best_prec1
@@ -250,6 +277,8 @@ def main():
         dataset_util = ImageNet_util()
     elif args.dataset_name == "CIFAR10":
         dataset_util = CIFAR10_util()
+    elif args.dataset_name in ["wikitext-2", "wikitext-103"]:
+        dataset_util = LM_util()
 
 
     model = dataset_util.get_model(args.arch)
@@ -275,6 +304,7 @@ def main():
     # exit()
     train_sampler = None
 
+    print("Batch size = ",args.batch_size)
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=8, pin_memory=True, sampler=train_sampler)
@@ -286,7 +316,7 @@ def main():
         ip_size = model_input.size()
         if i >= 0:
             break
-    summary = torchsummary.summary(model=model, module_whitelist=[], model_input=(model_input,), verbose=args.verbose, device="cuda")
+    summary = torchsummary.summary(model=model, module_whitelist=['CombinedEmbedding', 'TransformerEncoderLayerWithMask', 'FinalFCLayer'], model_input=(model_input,), verbose=args.verbose, device="cuda")
     
     del model_input
     # print(summary)
@@ -310,15 +340,22 @@ def main():
     print("Data loading time..", data_time, "ms")
 
     prof_num = 100
+
+    output, target = next(iter(train_loader)) 
+     
     for layer_details in summary:
-        layer = layer_details['layer_name']
-        input_ = torch.randn(*layer_details['input_shape'])
+        layer = layer_details['layer_obj']
+        input_ = output.detach() 
         grad_ = torch.randn(*layer_details['output_shape'])
         layer.cuda()
         
+        for param in layer.parameters():
+            param.requires_grad = True
+
+        input_.requires_grad = is_parameterless(layer)
         input_ = input_.cuda()
         grad_ = grad_.cuda() 
-        input_.requires_grad =  is_parameterless(layer)
+        
         fw_time = 0
         bw_time = 0 
         print("Profiling ",layer_details['layer_name'])
@@ -337,11 +374,10 @@ def main():
             end = time.time() 
             bw_time += (end-start)
         # print("Memory in bytes (before deletion) - " + str(torch.cuda.memory_allocated() ))
-        del input_
         layer.cpu()
+        # print("Memory in bytes (after deletion) - " + str(torch.cuda.memory_allocated() ))
+        del input_
         del grad_
-        del output
-        # print("Memory in bytes (after deletion) - " + str(torch.cuda.memory_allocated() )) 
         print("FW time {} ms BW time {} ms".format(fw_time * 1000/prof_num, bw_time * 1000/prof_num))
         layer_details['forward_time'] = fw_time * 1000 /prof_num
         layer_details['backward_time'] = bw_time * 1000 /prof_num

@@ -13,6 +13,7 @@ import runtime_utilities
 IMAGE_CLASSIFICATION = "image_classification"
 TRANSLATION = "translation"
 SPEECH_TO_TEXT = "speech_to_text"
+LANGUAGE_MODELLING = "language_modelling"
 
 
 class ModulesWithDependencies:
@@ -398,6 +399,14 @@ class StageRuntime:
                     input = input.half()
                 self.tensors[-1]["input0"] = input.cuda(non_blocking=True)
                 self.tensors[-1]["target"] = target.cuda(non_blocking=True)
+            elif self.model_type == LANGUAGE_MODELLING:
+                target = input["trg"].reshape(-1)
+                input = input["src"]
+                if self.fp16:
+                    input = input.half()
+                self.tensors[-1]["input0"] = input.cuda(non_blocking=True)
+                self.tensors[-1]["target"] = target.cuda(non_blocking=True)
+
             elif self.model_type == SPEECH_TO_TEXT:
                 input, target, input_percentages, target_sizes = input
                 input_sizes = input_percentages.mul_(int(input.size(3))).int()
@@ -411,7 +420,7 @@ class StageRuntime:
             for input_name in self.receive_ranks:
                 if input_name == "ack":
                     continue
-
+                
                 self.tensors[-1][input_name] = \
                     self.comm_handler.recv(
                         input_name,
@@ -432,7 +441,6 @@ class StageRuntime:
         for output_name in self.send_ranks:
             if output_name == "ack":
                 continue
-
             self.comm_handler.send(
                 output_name,
                 self.tensors[-1][output_name],

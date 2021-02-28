@@ -9,7 +9,7 @@ import torch.nn as nn
 """
 
 __all__ = [
-    'VGG', 'small_vgg',
+    'VGG', 'vgg_small',
 ]
 
 

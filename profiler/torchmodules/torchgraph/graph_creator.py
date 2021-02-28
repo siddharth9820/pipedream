@@ -215,7 +215,10 @@ class GraphCreator(object):
                         this_creator.inputs[key] = wrapped_inputs_list[i]
                     input.append(wrapped_inputs_list[i].tensor)
             result = this_creator.forward_original_methods[self](*input)
-            wrapped_result = TensorWrapper(result, str(self), this_creator)
+            if hasattr(self, 'init_name'):
+                wrapped_result = TensorWrapper(result, self.init_name, this_creator)
+            else:      
+                wrapped_result = TensorWrapper(result, str(self), this_creator)
             for wrapped_input in wrapped_inputs_list:
                 this_creator.graph.add_edge(wrapped_input.node(), wrapped_result.node())
 

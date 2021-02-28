@@ -39,7 +39,12 @@ class CommunicationHandler(object):
         # Initialize the distributed environment.
         os.environ['MASTER_ADDR'] = master_addr
         os.environ['MASTER_PORT'] = str(master_port)
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        # torch_comm_file = os.path.join(os.getcwd(), "temp.txt")
+        # if rank == 0:
+        #     if os.path.exists(torch_comm_file):
+        #         os.remove(torch_comm_file)
+
+        dist.init_process_group(backend, rank=rank, world_size=world_size) #init_method='file://'+torch_comm_file)
         assert dist.get_world_size() == self.world_size
         print("Finished initializing process group; backend: %s, rank: %d, "
               "world_size: %d" % (backend, rank, world_size))
@@ -613,10 +618,12 @@ def recv_helper_thread(queue, counter, local_rank, tensor_name,
     torch.cuda.set_device(local_rank)
     # This method is to be executed from a helper daemon thread.
     for i in range(num_iterations):
+        #(f"Receving {tensor_name} from {src_rank}")
         tensor = _recv(
             tensor_name, src_rank, tensor_shape=tensor_shape,
             dtype=dtype, tag=tag,
             sub_process_group=sub_process_group)
+        #print(f"Received {tensor_name} from {src_rank}")
         queue.add(tensor)
     counter.decrement()
 
@@ -671,10 +678,13 @@ def _recv(tensor_name, src_rank, tensor_shape=None, dtype=torch.float32,
                                          received_tensor_shape))
 
         # Receive tensor.
+        
         tensor = torch.zeros(received_tensor_shape, dtype=dtype)
         dist.recv(tensor=tensor,
                   src=src_rank,
                   tag=tag)
+        
+        #print(f"Receiving {tensor.shape} from {src_rank} with tag {tag}")
         tensor = tensor.cuda()
 
     assert tensor.is_cuda
@@ -708,5 +718,6 @@ def _send(tensor, tensor_name, src_rank, dst_rank, tag, sub_process_group=None):
         tensor_shape = torch.tensor(tensor.shape, dtype=torch.int)
         dist.send(tensor=tensor_shape, dst=dst_rank, tag=tag)
 
+        #print(f"Sending {tensor.shape} to {dst_rank} with tag {tag}")
         # Send tensor.
         dist.send(tensor=tensor, dst=dst_rank, tag=tag)

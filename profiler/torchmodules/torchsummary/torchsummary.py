@@ -36,7 +36,11 @@ def summary(model, module_whitelist, model_input, verbose, device="cuda"):
             class_name = str(module.__class__).split('.')[-1].split("'")[0]
             module_idx = len(summary_)
             summary_.append(OrderedDict())
-            summary_[-1]['layer_name'] = module
+            if hasattr(module, 'init_name'):
+                summary_[-1]['layer_name'] = module.init_name
+            else:
+                summary_[-1]['layer_name'] = module
+            summary_[-1]['layer_obj'] = module
             summary_[-1]['input_shape'] = list(input[0].size())
             if isinstance(output, (list,tuple)):
                 summary_[-1]['output_shape'] = []

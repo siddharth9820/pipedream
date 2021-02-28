@@ -1,0 +1,10 @@
+{
+  "0": "CombinedEmbedding(512,50274,0.1,5000)",
+  "1": "TransformerEncoderLayerWithMask(512, 8, 2048, 0.1, \"relu\")",
+  "2": "TransformerEncoderLayerWithMask(512, 8, 2048, 0.1, \"relu\")",
+  "3": "TransformerEncoderLayerWithMask(512, 8, 2048, 0.1, \"relu\")",
+  "4": "TransformerEncoderLayerWithMask(512, 8, 2048, 0.1, \"relu\")",
+  "5": "TransformerEncoderLayerWithMask(512, 8, 2048, 0.1, \"relu\")",
+  "6": "TransformerEncoderLayerWithMask(512, 8, 2048, 0.1, \"relu\")",
+  "7": "FinalFCLayer(512, 50274)"
+}
