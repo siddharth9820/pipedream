@@ -510,7 +510,7 @@ if __name__ == '__main__':
     else:
         inputs = ["\"input%d\"" % i for i in range(num_inputs)]
         assert(num_outputs == 1)
-        model.append("(%s.%s(), [%s], [\"output\"])" % (args.arch, args.model_name, ", ".join(inputs)))
+        model.append("(%s(), [%s], [\"output\"])" % (args.arch, ", ".join(inputs)))
         model.append("(criterion, [\"output\"], [\"loss\"])")
 
     with open(os.path.join(args.output_directory, "__init__.py"), 'w') as f1, \
@@ -524,7 +524,11 @@ if __name__ == '__main__':
         }
         f1.write(init)
 
-    if args.stage_to_num_ranks_map is not None:
+    b = len(args.stage_to_num_ranks_map.split(','))
+    if not (b>1):
+        args.stage_to_num_ranks_map = None 
+    print(pytorch_modules)
+    if (args.stage_to_num_ranks_map is not None):
         stage_to_num_ranks_map = args.stage_to_num_ranks_map.split(",")
         print(stage_to_num_ranks_map)
         stage_to_num_ranks_map = [(int(x.split(":")[0]), int(x.split(":")[1]))
@@ -570,4 +574,5 @@ if __name__ == '__main__':
             template = f2.read()
             conf = template % template_args
             f1.write(conf)
+            print(f"Wrote {conf_filename}")
 

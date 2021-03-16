@@ -6,42 +6,78 @@ do
     VALUE=$(echo $ARGUMENT | cut -f2 -d=)   
     case "$KEY" in
             ARCH)               ARCH=${VALUE} ;;
-            NUM_GPUS)           NUM_GPUS=${VALUE} ;;
+            NUM_GPUS_PER_NODE)  NUM_GPUS_PER_NODE=${VALUE} ;;
+            NUM_NODES)          NUM_NODES=${VALUE} ;;
             DATASET_NAME)       DATASET_NAME=${VALUE} ;;
-            DATASET_DIR)        DATASET_DIR=${VALUE} ;;     
+            DATASET_DIR)        DATASET_DIR=${VALUE} ;;
+            RUN_PROFILE)        RUN_PROFILE=${VALUE} ;;
+            
             *)   
     esac    
 done
 
-PIPEDREAM_HOME="/cfarhomes/ssingh37/pipedream"
-BATCH_SIZE=32
-RUN_PROFILE=0
+PIPEDREAM_HOME="/home/ssingh37/pipedream"
+
+
 RUN_OPTIM=1
+
+## Change this part ##
+BATCH_SIZE=64
+INTRA_BW=200000000000
+INTER_BW=14000000000
+GLOO_SOCKET_IFNAME=infinibond0
+IP=$(ip -4 addr show $GLOO_SOCKET_IFNAME | grep -oP "(?<=inet ).*(?=/)" 2>&1 | head -n 1)
+
+intra=$(($INTRA_BW / 1000000000))
+inter=$(($INTER_BW / 1000000000)) 
+
+NUM_GPUS=$(($NUM_GPUS_PER_NODE*$NUM_NODES)) 
+
+LOG_DIR="$PIPEDREAM_HOME/logs/$ARCH/gpus_$NUM_GPUS"
+
+
+echo "Running on $NUM_NODES nodes, $NUM_GPUS_PER_NODE GPUs per node"
+echo 
+echo "============================================================"
+echo "The following stuff is hardcoded (unfortunately!) in the bash script:"
+echo "Bandwidths: (Intra Node) : $intra GBPS (Inter Node) : $inter GBPS"
+echo "Batch Size = $BATCH_SIZE"
+echo "Using $GLOO_SOCKET_IFNAME IP - $IP socket for gloo P2P inter-node communication"
+echo "If any of these values are wrong, please modify them in the bash script"
+echo "============================================================"
+echo
+
+
+
+echo "Checking if dataset directory exists.."
 if [ -z ${DATASET_DIR+x} ]; then SYNTHETIC_DATA=1; else SYNTHETIC_DATA=0; fi
+if [ $SYNTHETIC_DATA -eq 1 ]; then
+    echo "Dataset directory not found, switching to synthetic data.."
+else 
+    echo "Dataset directory found!"
+fi
+
 
 MODE=1 #0 = Naive model parallelism, 1 = Hybrid parallelism, 2 = Data parallelism
+
 MODEL_OUTPUT_DIR=$PIPEDREAM_HOME/runtime/image_classification/models/$DATASET_NAME/$ARCH/$NUM_GPUS
 PROFILE_OUTPUT_DIR=$PIPEDREAM_HOME/profiler/image_classification/profiles/$DATASET_NAME
 
+echo
+
 ## STEP 1 - Run profiler
 cd $PIPEDREAM_HOME/profiler/image_classification 
-export LD_LIBRARY_PATH="/cfarhomes/ssingh37/miniconda3/lib/":$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_DIR:$LD_LIBRARY_PATH
 
 if [ $RUN_PROFILE -eq 1 ];then
     echo "Running Pipedream Profiler"
-    if [ ! -d $PROFILE_OUPTPUT_DIR ]; then
-        mkdir -p $PROFILE_OUTPUT_DIR
+    if [ ! -d $PROFILE_OUPTPUT_DIR/$ARCH ]; then
+        mkdir -p $PROFILE_OUTPUT_DIR/$ARCH
     fi 
-    
-    # if [ $SYNTHETIC_DATA -eq 1 ];then
+ 
     echo "Using $DATASET_NAME with $ARCH"
     python -u main_corrected.py -a $ARCH -b $BATCH_SIZE -s -v --profile_directory $PROFILE_OUTPUT_DIR --dataset-name $DATASET_NAME 
-                                                    
-    # else
-    #     echo "Using $DATASET_NAME with $ARCH" 
-    #     python -u main_corrected.py -a $ARCH -b $BATCH_SIZE --data_dir $DATASET_DIR -v \
-    #                                                     --profile_directory $PROFILE_OUTPUT_DIR --dataset-name $DATASET_NAME
-    # fi
+  
 else 
     echo "Not Running Pipedream Profiler"
 fi
@@ -51,17 +87,17 @@ cd $PIPEDREAM_HOME/optimizer
 
 cat $PROFILE_OUTPUT_DIR/$ARCH/graph.txt
 # STEP 2 - Run Optimizer
-echo "Running PipeDream Optimizer"
 
 if [ ! -d ./$DATASET_NAME/$ARCH/$NUM_GPUS ]; then
   mkdir -p ./$DATASET_NAME/$ARCH/$NUM_GPUS 
 fi
 
 if [ $RUN_OPTIM -eq 1 ];then
-    python optimizer_graph_hierarchical.py -n $NUM_GPUS -f $PROFILE_OUTPUT_DIR/$ARCH/graph.txt -b 13000000000  -o ./$DATASET_NAME/$ARCH/$NUM_GPUS 
+    echo "Running PipeDream Optimizer and generating pipedream model"
+
+    python optimizer_graph_hierarchical.py -n $NUM_GPUS_PER_NODE $NUM_NODES -f $PROFILE_OUTPUT_DIR/$ARCH/graph.txt -b $INTRA_BW $INTER_BW  -o ./$DATASET_NAME/$ARCH/$NUM_GPUS 
 
     repl_factors=$(<./$DATASET_NAME/$ARCH/$NUM_GPUS/stage_to_num_ranks_map.txt)
-
 
     if [ ! -d $MODEL_OUTPUT_DIR ]; then
         mkdir -p $MODEL_OUTPUT_DIR
@@ -70,41 +106,51 @@ if [ $RUN_OPTIM -eq 1 ];then
     # ## STEP 3 - Convert output of optimizer into a pytorch model
     rm -rf $MODEL_OUTPUT_DIR/*
     python convert_graph_to_model.py -n $NUM_GPUS -f ./$DATASET_NAME/$ARCH/$NUM_GPUS/gpus=$NUM_GPUS.txt --stage_to_num_ranks_map $repl_factors -n $ARCH -a $ARCH -o $MODEL_OUTPUT_DIR
-    cat $MODEL_OUTPUT_DIR/hybrid_conf.json
-
-    echo $repl_factors
+    
     
 fi
 
-repl_factors=$(<./$DATASET_NAME/$ARCH/$NUM_GPUS/stage_to_num_ranks_map.txt)
-res="${repl_factors//[^:]}"
-num_stages="${#res}"
 
+if [ ! -f $MODEL_OUTPUT_DIR/hybrid_conf.json ]; then
+    echo "Detected pure data parallelism configuration"
+    MODE=2
+fi
 
-# ## STEP 4 - Execute runtime
+## STEP 4 - Execute runtime
 cd $PIPEDREAM_HOME/runtime/image_classification
 
-# This is written strictly for all GPUs on a single node
-if [ $MODE -eq 0 ]; then
-    if [ $DATASET_NAME = "MNIST" ];then
-        python -m torch.distributed.launch --nproc_per_node=$num_stages main_with_runtime.py --master_addr localhost --module models.$ARCH.$NUM_GPUS -b $BATCH_SIZE  --config_path $MODEL_OUTPUT_DIR/mp_conf.json --distributed_backend gloo --no_input_pipelining --dataset-name MNIST --data-dir $DATASET_DIR
-    else 
-        python -m torch.distributed.launch --nproc_per_node=$num_stages main_with_runtime.py --master_addr localhost --module models.$ARCH.$NUM_GPUS -b $BATCH_SIZE -s --config_path $MODEL_OUTPUT_DIR/mp_conf.json --distributed_backend gloo --no_input_pipelining 
-    fi
-fi 
 
-if [ $MODE -eq 1 ]; then 
-    if [ $SYNTHETIC_DATA -eq 0 ];then
-        python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS main_with_runtime.py --master_addr localhost --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --language_modelling --num_ranks_in_server $NUM_GPUS
-    fi
+
+
+if [ -d $LOG_DIR ]; then
+  echo "Deleting $LOG_DIR"
+  rm -rf $LOG_DIR 
+fi
+
+echo "Creating $LOG_DIR"
+mkdir -p $LOG_DIR
+
+if [ $MODE -eq 1 ]; then     
+    echo "launching hybrid parallelism job"
+    
+    if [ -f ./temp.txt ]; then
+        echo "deleting torch comm file.."
+        rm ./temp.txt
+    fi 
+
+    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR  --num_ranks_in_server $NUM_GPUS_PER_NODE --world_size $NUM_GPUS --lr 0.1 -j 32 --log_dir $LOG_DIR #-s #--language_modelling
 fi
 
 if [ $MODE -eq 2 ]; then 
-    if [ $DATASET_NAME = "MNIST" ];then
-        python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS main_with_runtime.py --master_addr localhost --module models.$ARCH.$NUM_GPUS -b $BATCH_SIZE -s --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name MNIST --data-dir $DATASET_DIR
-    else
-        python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS main_with_runtime.py --master_addr localhost --module models.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining
-    fi
+    echo "launching data parallel job"
+
+    if [ -f ./temp.txt ]; then
+        echo "deleting torch comm file.."
+        rm ./temp.txt
+    fi 
+
+    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x NCCL_SOCKET_IFNAME=infinibond0 -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --data_prl --world_size $NUM_GPUS --num_ranks_in_server $NUM_GPUS_PER_NODE --lr 0.1 -j 32 --log_dir $LOG_DIR #--lr 0.001 --language_modelling
+    
 fi
 
 

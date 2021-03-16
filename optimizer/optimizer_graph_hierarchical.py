@@ -13,7 +13,6 @@ import sys
 sys.path.append("..")
 import graph
 import utils
-import json
 
 def compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                          output_activation_sizes, all_predecessor_ids,
@@ -46,7 +45,7 @@ def compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                 if cum_compute_time is None:
                     A[i][j][m] = (None, None, None)
                 else:
-                    A[i][j][m] = (max([cum_compute_time,
+                    A[i][j][m] = (sum([cum_compute_time,
                                        data_parallel_communication_time]) / (m+1), None, (m+1))
 
     min_machines = 1
@@ -78,7 +77,7 @@ def compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                         stashed_data_size *= math.ceil((num_machines - (m+1)) / m_prime)
                         if use_memory_constraint and stashed_data_size > memory_size:
                             continue
-                        last_stage_time = max([last_stage_time,
+                        last_stage_time = sum([last_stage_time,
                                                ((4 * (m_prime - 1) *
                                                 last_stage_parameter_size) / (bandwidth * m_prime))])
                         last_stage_time /= m_prime
@@ -283,7 +282,7 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
     for num_machines, network_bandwidth in zip(all_num_machines, network_bandwidths):
         print("Solving optimization problem with %d machines with inter-machine bandwidth of %.2f GB/s" % (num_machines, network_bandwidth / 10**9))
         import numpy as np
-        #print(np.array(compute_times))
+        print(np.array(compute_times))
         A = compute_partitioning(compute_times, activation_sizes, parameter_sizes,
                                  output_activation_sizes, all_predecessor_ids,
                                  num_machines, num_machines_in_machine,
@@ -295,26 +294,20 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
                 compute_times[i][j] = A[i][j][-1][0]
         counter += 1
         all_As.append(A)
-    #print(np.array(compute_times))
-
-    charm_nn_config = {}
-    for i,state in enumerate(states):
-        assert len(state.antichain) == 1
-        node = state.antichain[0]
-        node_desc = gr.nodes[node].node_desc
-        #print(node_desc)
-        charm_nn_config[i] = node_desc
+    print(np.array(compute_times))
 
     splits = [(0, len(states))]
     i = len(all_As) - 1
     stage_to_num_ranks_map = {}
     layer_to_stage_map = {}
+    prev_rfs = [1]
     while i >= 0:
         print("======================================")
         print("Level %d" % (i+1))
         print("======================================")
         new_splits = []
         stage_id = 0
+        new_rfs = []
         for (start, end) in splits:
             partial_splits, replication_factors = \
                 analyze_partitioning(all_As[i], states, start, end,
@@ -322,6 +315,10 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
                                      activation_compression_ratio,
                                      print_configuration, verbose)
             start_point = start
+            replication_factors = [x*prev_rfs[stage_id] for x in replication_factors]
+            new_rfs += replication_factors
+
+            ind = 0
             for split in partial_splits:
                 new_splits.append((start_point, split))
                 if i == 0:
@@ -329,11 +326,13 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
                     for predecessor in predecessors:
                         if predecessor.stage_id is None:
                             predecessor.set_stage_id(stage_id)
-                    stage_to_num_ranks_map[stage_id] = replication_factors[stage_id]
+                    stage_to_num_ranks_map[stage_id] = replication_factors[ind]
                     for layer_no in range(start_point, split):
                         layer_to_stage_map[layer_no] = stage_id
                 start_point = split
                 stage_id += 1
+                ind += 1 
+            
             
             new_splits.append((start_point, end))
             if i == 0:
@@ -341,11 +340,12 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
                 for predecessor in predecessors:
                     if predecessor.stage_id is None:
                         predecessor.set_stage_id(stage_id)
-                stage_to_num_ranks_map[stage_id] = replication_factors[stage_id]
+                stage_to_num_ranks_map[stage_id] = replication_factors[ind]
                 for layer_no in range(start_point, end):
                         layer_to_stage_map[layer_no] = stage_id
             stage_id += 1
-            print("Replication factors = ", stage_to_num_ranks_map)
+        prev_rfs = new_rfs 
+
         print("Total number of stages: %d" % stage_id)
         splits = new_splits
         i -= 1
@@ -364,7 +364,7 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         gr_str = str(gr)
         with open(os.path.join(output_directory, "gpus=%d.txt" % total_num_machines), 'w') as f:
             f.write(gr_str)
-        
+
         str_map = ""
         for stage, repl_factor in stage_to_num_ranks_map.items():
             if len(str_map) == 0:
@@ -375,14 +375,11 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         print(str_map)
         with open(os.path.join(output_directory, "stage_to_num_ranks_map.txt" ), 'w') as f:
             f.write(str_map)
-        
-        with open(os.path.join(output_directory, "charm_nn_config.json"), "w") as f:
-            json.dump(charm_nn_config, f, indent=2) 
+        import json 
         
         with open(os.path.join(output_directory, "layer_to_stage_map.json"), "w") as f:
             json.dump(layer_to_stage_map, f, indent=2)
-        
-        print(layer_to_stage_map)
+
 
     total_time = states[-1].compute_time
     total_parameter_size = states[-1].parameter_size
@@ -392,7 +389,7 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         data_parallel_communication_time = (
             (4 * (num_machines - 1) * total_parameter_size) /
             (network_bandwidth * num_machines)) / num_machines_in_machine
-        data_parallel_total_time = max(
+        data_parallel_total_time = sum(
             [data_parallel_total_time, data_parallel_communication_time]) / num_machines
         num_machines_in_machine = num_machines
     pipeline_parallel_total_time = A[0][len(states)-1][num_machines-1][0]

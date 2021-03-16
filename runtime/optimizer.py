@@ -17,6 +17,66 @@ class Version:
     def incr(self):
         return Version(version=self.version+1)
 
+class Adam_Base(object):
+    """An Adam optimizer written for myelin which can handle weight stashing
+    """    
+    def __init__(self, parameters, learning_rate=0.001, beta_1=0.9, beta_2=0.999, eps=1e-8, id=None):
+        """Initialise the Adam optimizer
+        Args:
+            parameters (Iterator[torch.nn.parameter.Parameter]): parameter iterator of a module i.e. module.parameters()
+            learning_rate (int): learning rate. Defaults to 0.001
+            beta_1 (float) : decay factor for first moment. Defaults to 0.9 
+            beta_2 (float) : decay factor for second moment. Defaults to 0.999
+            id ((int,int), optional): The ID of the chare invoking this class. Defaults to None.
+        """        
+        self.parameters = list(parameters) 
+        self.learning_rate = learning_rate 
+        self.beta1 = beta_1
+        self.beta2 = beta_2 
+        self.t = 1
+        self.eps = eps
+        
+        self.m = []
+        self.v = []
+        for param in self.parameters:
+            self.m.append(torch.zeros_like(param.data).cuda())
+            self.v.append(torch.zeros_like(param.data).cuda())
+
+    def step(self, params):
+        """Update the weights of the module using the gradient data
+        Args:
+             params (Iterator[torch.nn.parameter.Parameter]): parameter iterator of a module i.e. module.parameters()
+        """ 
+        t = self.t
+        beta1, beta2 = self.beta1, self.beta2
+        alpha = self.learning_rate * np.sqrt(1 - beta2**t) / (1 - beta1**t)
+        eps = self.eps        
+        for i,param in enumerate(params):
+            if param.grad is not None:
+                m = self.m[i]
+                v = self.v[i]
+                g = param.grad
+                m.mul_(beta1)
+                m.add_(g, alpha=1-beta1)
+                v.mul_(beta2)
+                v.add_(g**2, alpha=1-beta2)
+                param.data.add_(m/(torch.sqrt(v) + eps), alpha=-alpha)
+        self.t+=1 
+    
+    def update_lr(self, new_lr):
+        """Update the learning rate of the optimizer
+        Args:
+            new_lr (float): new learning rate
+        """        
+        self.learning_rate = new_lr
+    
+    def zero_grad(self):
+        """Zero out all parameter gradients
+        """        
+        for param in self.parameters:
+            if param.grad != None:
+                param.grad.zero_()
+
 class SGD_Base(object):
     def __init__(self, parameters, learning_rate):
         self.parameters = parameters 
@@ -53,8 +113,7 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
     """
 
     def __init__(self, optim_name, modules, master_parameters, model_parameters,
-                 loss_scale, num_versions, verbose_freq=0, macrobatch=False,
-                 **optimizer_args):
+                 loss_scale, num_versions, verbose_freq=0, macrobatch=False, type='SGD', **optimizer_args):
         self.modules = modules
         self.master_parameters = master_parameters
         self.model_parameters = model_parameters  # model_parameters is None if not fp16.
@@ -67,8 +126,14 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
         self.num_versions = num_versions
         # self.base_optimizer = getattr(torch.optim, optim_name)(
         #     master_parameters, **optimizer_args)
-        self.base_optimizer = SGD_Base(master_parameters, self.lr)
         
+        if type == "SGD":
+            self.base_optimizer = SGD_Base(master_parameters, self.lr)
+        elif type == "Adam":
+            self.base_optimizer = Adam_Base(master_parameters, self.lr)
+        else:
+            raise NotImplementedError
+
         self.latest_version = Version()
         self.current_version = Version()
         self.initialize_queue()

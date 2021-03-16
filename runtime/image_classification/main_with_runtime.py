@@ -22,6 +22,21 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
+
+import socket
+import fcntl
+import struct
+
+def get_ip_address(ifname):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return socket.inet_ntoa(fcntl.ioctl(
+        s.fileno(),
+        0x8915,  # SIOCGIFADDR
+        struct.pack('256s', ifname[:15])
+    )[20:24])
+
+
 
 sys.path.append("..")
 sys.path.append("../../dataloaders/language_modelling")
@@ -29,9 +44,16 @@ sys.path.append("../../dataloaders/language_modelling")
 
 import runtime
 import sgd
+import adam 
 import transformers
 
 import huggingface
+
+from mpi4py import MPI 
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--data-dir', type=str,
@@ -74,8 +96,8 @@ parser.add_argument('--no_input_pipelining', action='store_true',
                     help="No pipelining of inputs",default=False)
 parser.add_argument('--rank', default=None, type=int,
                     help="Rank of worker")
-parser.add_argument('--local_rank', default=0, type=int,
-                    help="Local rank of worker")
+parser.add_argument('--world_size', default=0, type=int,
+                    help="Total number of gpus")
 parser.add_argument('--forward_only', action='store_true',
                     help="Run forward pass only")
 parser.add_argument('--num_minibatches', default=None, type=int,
@@ -107,8 +129,12 @@ parser.add_argument('--bptt-len', default=256, type=int,
 parser.add_argument('--language_modelling', action='store_true',
                     help="Run a Language Modelling Task", default=False)
 
+parser.add_argument('--data_prl', action='store_true',
+                    help='data parallelism')
 
+parser.add_argument('--log_dir', help='directory to save logs into', type=str)
 best_prec1 = 0
+
 
 
 # Helper methods.
@@ -152,10 +178,21 @@ class SyntheticDatasetImageClassification(torch.utils.data.dataset.Dataset):
 def main():
     global args, best_prec1
     args = parser.parse_args()
+    if rank >= args.world_size:
+        return
     print("initialising device...")
-    torch.cuda.set_device(args.local_rank)
-    print("local rank {} device {}".format(args.local_rank, torch.cuda.current_device()))
-    args.rank = args.local_rank # my change
+    local_rank = rank % args.num_ranks_in_server
+    print("workers = ",args.workers)
+
+    writer=None
+    if args.log_dir:
+        writer=SummaryWriter(log_dir=args.log_dir)
+    ##### ENABLING GPU DIRECT HERE THROUGH A HACK ###
+    args.num_ranks_in_server = args.world_size
+
+    torch.cuda.set_device(local_rank)
+    print("local rank {} device {}".format(local_rank, torch.cuda.current_device()))
+    args.rank = rank # my change
     # define loss function (criterion)
     criterion = nn.CrossEntropyLoss()
 
@@ -163,7 +200,7 @@ def main():
     module = importlib.import_module(args.module)
     args.arch = module.arch()
     model = module.model(criterion)
-    print("Local rank {} imported module".format(args.local_rank))
+    print("Local rank {} imported module".format(local_rank))
 
     # determine shapes of all tensors in passed-in model
     
@@ -199,11 +236,13 @@ def main():
                 input_dtype = first_stage_input_dtype
             else:
                 input_dtype = torch.float32
-            stage_number += 1
+            
             input_tensor = torch.zeros(tuple(training_tensor_shapes[input]),
-                                       dtype=input_dtype)
+                                       dtype=input_dtype).cuda()
+                                    
             input_tensors.append(input_tensor)
-        
+        stage_number += 1
+        stage.cuda()
         with torch.no_grad():
             output_tensors = stage(*tuple(input_tensors))
         if not type(output_tensors) is tuple:
@@ -214,9 +253,9 @@ def main():
             dtypes[output] = output_tensor.dtype
         del output_tensors
         del input_tensors
-        
+        stage.cpu()
 
-    print("local rank {} finished 1 forward pass...".format(args.local_rank))
+    #print("local rank {} finished 1 forward pass...".format(local_rank))
     eval_tensor_shapes = {}
     for key in training_tensor_shapes:
         eval_tensor_shapes[key] = tuple(
@@ -235,9 +274,18 @@ def main():
         configuration_maps['stage_to_rank_map'] = json_config_file.get("stage_to_rank_map", None)
         configuration_maps['stage_to_rank_map'] = {
             int(k): v for (k, v) in configuration_maps['stage_to_rank_map'].items()}
+        # print("========================")
+        # print(configuration_maps['stage_to_rank_map'])
+        
         configuration_maps['stage_to_depth_map'] = json_config_file.get("stage_to_depth_map", None)
+    
+    if args.data_prl:
+        print("Modifying stage to rank map to be data parallel")
+        stage_to_rank_map = configuration_maps['stage_to_rank_map']
+        for k in stage_to_rank_map:
+            stage_to_rank_map[k] = list(range(args.world_size))
 
-    print("Local rank {} Staging runtime....".format(args.local_rank))
+    print("Local rank {} Staging runtime....".format(local_rank))
 
     if args.language_modelling:
         model_type = runtime.LANGUAGE_MODELLING
@@ -255,7 +303,7 @@ def main():
         target_tensor_names=target_tensor_names,
         configuration_maps=configuration_maps,
         master_addr=args.master_addr, rank=args.rank,
-        local_rank=args.local_rank,
+        local_rank=local_rank,
         num_ranks_in_server=args.num_ranks_in_server,
         verbose_freq=args.verbose_frequency,
         model_type=model_type,
@@ -292,14 +340,18 @@ def main():
 
     #print_msg(args.rank, "number of versions" + str(num_versions) )
 
-    optimizer = sgd.SGDWithWeightStashing(r.modules(), r.master_parameters,
-                                          r.model_parameters, args.loss_scale,
-                                          num_versions=num_versions,
-                                          lr=args.lr,
-                                          momentum=args.momentum,
-                                          weight_decay=args.weight_decay,
-                                          verbose_freq=args.verbose_frequency,
-                                          macrobatch=args.macrobatch)
+    if args.language_modelling:
+        optimizer = adam.AdamWithWeightStashing(r.modules(),r.master_parameters, r.model_parameters, args.loss_scale, num_versions=num_versions, lr=args.lr, weight_decay=args.weight_decay, verbose_freq=args.verbose_frequency, macrobatch=args.macrobatch)
+    else:
+        # optimizer = sgd.SGDWithWeightStashing(r.modules(), r.master_parameters,
+        #                                   r.model_parameters, args.loss_scale,
+        #                                   num_versions=num_versions,
+        #                                   lr=args.lr,
+        #                                   momentum=args.momentum,
+        #                                   weight_decay=args.weight_decay,
+        #                                   verbose_freq=args.verbose_frequency,
+        #                                   macrobatch=args.macrobatch)
+        optimizer = adam.AdamWithWeightStashing(r.modules(),r.master_parameters, r.model_parameters, args.loss_scale, num_versions=num_versions, lr=args.lr, weight_decay=args.weight_decay, verbose_freq=args.verbose_frequency, macrobatch=args.macrobatch)
     
 
     if args.resume:
@@ -312,115 +364,131 @@ def main():
                                      std=[0.229, 0.224, 0.225])
     print(args.dataset_name)
     
-    if args.rank==0:
-        if args.dataset_name == "ImageNet":
-            if args.arch == 'inception_v3':
-                if args.synthetic_data:
-                    train_dataset = SyntheticDatasetImageClassification((3, 299, 299), 10000)
-                else:
-                    traindir = os.path.join(args.data_dir, 'train')
-                    train_dataset = datasets.ImageFolder(
-                        traindir,
-                        transforms.Compose([
-                            transforms.RandomResizedCrop(299),
-                            transforms.ToTensor(),
-                            normalize,
-                        ])
-                    )
-            else:
-                print("Initialising dataset..")
-                if args.synthetic_data:
-                    train_dataset = SyntheticDatasetImageClassification((3, 224, 224),  1281168 ) #modified
-                else:
-                    traindir = os.path.join(args.data_dir, 'train')
-                    train_dataset = datasets.ImageFolder(
-                        traindir,
-                        transforms.Compose([
-                            transforms.RandomResizedCrop(224),
-                            transforms.RandomHorizontalFlip(),
-                            transforms.ToTensor(),
-                            normalize,
-                        ]))
 
+    if args.dataset_name == "ImageNet":
+        if args.arch == 'inception_v3':
             if args.synthetic_data:
-                val_dataset = SyntheticDatasetImageClassification((3, 224, 224), 10000)
+                train_dataset = SyntheticDatasetImageClassification((3, 299, 299), 10000)
             else:
-                valdir = os.path.join(args.data_dir, 'val')
-                val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
-                    transforms.Resize(256),
-                    transforms.CenterCrop(224),
-                    transforms.ToTensor(),
-                    normalize,
-                ]))
-        
-        elif args.dataset_name == "MNIST":
-            train_dataset = datasets.MNIST(
-                args.data_dir,
-                download=True,
-                train=True,
-                transform=transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(
-                        (0.1307,), (0.3081,)),
-                ]))
-
-            val_dataset = datasets.MNIST(args.data_dir, download=True,
-                                                        train=False,
-                                                        transform=transforms.Compose([
-                                                        transforms.ToTensor(),  # first, convert image to PyTorch tensor
-                                                        transforms.Normalize(
-                                                            (0.1307,), (0.3081,))
-                                                    ]))
-        elif args.dataset_name == "CIFAR10":
-            transform = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-            train_dataset = datasets.CIFAR10(root=args.data_dir, train=True, transform =transform)
-            val_dataset = datasets.CIFAR10(root=args.data_dir, train=False, transform =transform)
-        elif args.dataset_name in args.dataset_name in ["wikitext-2", "wikitext-103"]:
-            tokenizer = transformers.GPT2TokenizerFast.from_pretrained('gpt2')
-            if not args.synthetic_data:
-                train_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'train', num_workers=1, bptt_len=args.bptt_len)
-                val_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'validation', num_workers=1, bptt_len=args.bptt_len)
+                traindir = os.path.join(args.data_dir, 'train')
+                train_dataset = datasets.ImageFolder(
+                    traindir,
+                    transforms.Compose([
+                        transforms.RandomResizedCrop(299),
+                        transforms.ToTensor(),
+                        normalize,
+                    ])
+                )
+        else:
+            print("Initialising dataset..")
+            if args.synthetic_data:
+                train_dataset = SyntheticDatasetImageClassification((3, 224, 224),  1281168 ) #modified
             else:
-                if args.dataset_name == "wikitext-2":
-                    train_length = 36718
-                else:
-                    train_length = 1801350
-                train_dataset = SyntheticDatasetLanguageModelling(tokenizer.vocab_size, args.bptt_len, train_length)
-                val_dataset = SyntheticDatasetLanguageModelling(tokenizer.vocab_size, args.bptt_len, 3760)
+                traindir = os.path.join(args.data_dir, 'train')
+                train_dataset = datasets.ImageFolder(
+                    traindir,
+                    transforms.Compose([
+                        transforms.RandomResizedCrop(224),
+                        transforms.RandomHorizontalFlip(),
+                        transforms.ToTensor(),
+                        normalize,
+                    ]))
 
-        distributed_sampler = False
-        train_sampler = None
-        val_sampler = None
-        if configuration_maps['stage_to_rank_map'] is not None:
-            num_ranks_in_first_stage = len(configuration_maps['stage_to_rank_map'][0])
-            if num_ranks_in_first_stage > 1:
-                train_sampler = torch.utils.data.distributed.DistributedSampler(
-                    train_dataset, num_replicas=num_ranks_in_first_stage,
-                    rank=args.rank)
-                val_sampler = torch.utils.data.distributed.DistributedSampler(
-                    val_dataset, num_replicas=num_ranks_in_first_stage,
-                    rank=args.rank)
-                distributed_sampler = True
-
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-            num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
-
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset, batch_size=args.eval_batch_size, shuffle=False,
-            num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=True)
-        
-        print(f"Rank {args.rank}: Length of train loader: {len(train_loader)} Length of dataset: {len(train_dataset)} BPTT_LEN {args.bptt_len} BATCH SIZE {args.batch_size}")
-    else:
-        train_loader = None
-        val_loader = None 
+        if args.synthetic_data:
+            val_dataset = SyntheticDatasetImageClassification((3, 224, 224), 10000)
+        else:
+            valdir = os.path.join(args.data_dir, 'val')
+            val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                normalize,
+            ]))
     
-    if args.rank==0:
-        lengths = torch.LongTensor([len(train_loader), len(val_loader)])
-    else:
-        lengths = torch.zeros((2)).long()
-    dist.broadcast(lengths, src=0)
+    elif args.dataset_name == "MNIST":
+        train_dataset = datasets.MNIST(
+            args.data_dir,
+            download=True,
+            train=True,
+            transform=transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    (0.1307,), (0.3081,)),
+            ]))
 
+        val_dataset = datasets.MNIST(args.data_dir, download=True,
+                                                    train=False,
+                                                    transform=transforms.Compose([
+                                                    transforms.ToTensor(),  # first, convert image to PyTorch tensor
+                                                    transforms.Normalize(
+                                                        (0.1307,), (0.3081,))
+                                                ]))
+    elif args.dataset_name == "CIFAR10":
+        transform = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+        train_dataset = datasets.CIFAR10(root=args.data_dir, train=True, transform =transform)
+        val_dataset = datasets.CIFAR10(root=args.data_dir, train=False, transform =transform)
+    elif args.dataset_name in args.dataset_name in ["wikitext-2", "wikitext-103"]:
+        tokenizer = transformers.GPT2TokenizerFast.from_pretrained('gpt2')
+        if not args.synthetic_data:
+            train_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'train', num_workers=1, bptt_len=args.bptt_len)
+            val_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'validation', num_workers=1, bptt_len=args.bptt_len)
+        else:
+            if args.dataset_name == "wikitext-2":
+                train_length = 36718
+            else:
+                train_length = 1801350
+            train_dataset = SyntheticDatasetLanguageModelling(tokenizer.vocab_size, args.bptt_len, train_length)
+            val_dataset = SyntheticDatasetLanguageModelling(tokenizer.vocab_size, args.bptt_len, 3760)
+
+    distributed_sampler = False
+    train_sampler = None
+    val_sampler = None
+    if configuration_maps['stage_to_rank_map'] is not None:
+        num_ranks_in_first_stage = len(configuration_maps['stage_to_rank_map'][0])
+        if num_ranks_in_first_stage > 1:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(
+                train_dataset, num_replicas=num_ranks_in_first_stage,
+                rank=args.rank)
+            val_sampler = torch.utils.data.distributed.DistributedSampler(
+                val_dataset, num_replicas=num_ranks_in_first_stage,
+                rank=args.rank)
+            distributed_sampler = True
+
+    print("initialising data loaders")
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset, batch_size=args.eval_batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=True)
+    
+    print(f"Rank {args.rank}: Length of train loader: {len(train_loader)} Length of dataset: {len(train_dataset)} BPTT_LEN {args.bptt_len} BATCH SIZE {args.batch_size}")
+    # else:
+    #     train_loader = None
+    #     val_loader = None 
+    
+    # if args.rank==0:
+    #     lengths = torch.LongTensor([len(train_loader), len(val_loader)]).cuda()
+    # else:
+    #     lengths = torch.zeros((2)).long().cuda()
+    # dist.broadcast(lengths, src=0)
+
+    lengths = torch.LongTensor([len(train_loader), len(val_loader)])
+
+    quantities = [len(configuration_maps['stage_to_rank_map'][0])]
+    for i in range(len(configuration_maps['stage_to_rank_map']) - 1):
+        curr = len(configuration_maps['stage_to_rank_map'][i])
+        curr *= len(configuration_maps['stage_to_rank_map'][i+1])
+        quantities.append(curr)
+    print(quantities)
+    lcm = np.lcm.reduce(quantities)
+    print(f"new length should be a multiple of {lcm}")
+    old_length = lengths[0].item()
+    lengths[0] = (lengths[0] // lcm) * lcm
+    print(f"Old length {old_length} Adjusted Length {lengths[0]}")
+
+    #exit()
     # if checkpoint is loaded, start by running validation
     if args.resume:
         assert args.start_epoch > 0
@@ -434,7 +502,7 @@ def main():
         if args.forward_only:
             validate(val_loader, r, epoch)
         else:
-            train(train_loader, r, optimizer, epoch, model_type, lengths)
+            train(train_loader, r, optimizer, epoch, model_type, lengths, writer)
 
             # evaluate on validation set
             # prec1 = validate(val_loader, r, epoch)
@@ -454,7 +522,7 @@ def main():
             #     }, args.checkpoint_dir, r.stage)
 
 
-def train(train_loader, r, optimizer, epoch, model_type, lengths):
+def train(train_loader, r, optimizer, epoch, model_type, lengths, writer=None):
     batch_time = AverageMeter()
     losses = AverageMeter()
     if model_type == runtime.IMAGE_CLASSIFICATION:
@@ -481,7 +549,7 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths):
         print("Letting in %d warm-up minibatches" % num_warmup_minibatches)
         print("Running training for %d minibatches" % n)
 
-    print("warmup minibatches = ", num_warmup_minibatches)
+    print(f"rank {rank} warmup minibatches = ", num_warmup_minibatches)
 
     # start num_warmup_minibatches forward passes
     for i in range(num_warmup_minibatches):
@@ -490,6 +558,7 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths):
     print("Warmup done...")
     for i in range(n - num_warmup_minibatches):
         # perform forward pass
+        # print(f"Rank {rank} iteration {i+num_warmup_minibatches} / {n}")
         r.run_forward()
         # Adjust learning rate
         adjust_learning_rate(optimizer, epoch, args.epochs, r, args.lr_policy, i, n)
@@ -503,23 +572,31 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths):
                 top5.update(prec5[0], output.size(0))
 
             losses.update(loss.item(), output.size(0))
-    
-            # measure elapsed time
             batch_time.update(time.time() - end)
+            
+            throughput = r.num_ranks_in_stage*(1/batch_time.avg) 
+            
+            if writer and (r.rank_in_stage==0):
+                n_iter = i
+                writer.add_scalar(f'Loss/train', loss.item(), n_iter)
+                writer.add_scalar(f'Perf/avg_throughput', throughput, n_iter)
+
+            # measure elapsed time
             end = time.time()
             epoch_time = (end - epoch_start_time) / 3600.0
             full_epoch_time = (epoch_time / (float(i+1)+num_warmup_minibatches)) * float(n) #changed
 
-            if i % args.print_freq == 0:       
+            if i % args.print_freq == 0:      
                 if model_type == runtime.IMAGE_CLASSIFICATION:
                     print('Epoch: [{0}][{1}/{2}]\t'
                         'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                        'Throughput: ({throughput:.3f})\t'
                         'Epoch time [hr]: {epoch_time:.3f} ({full_epoch_time:.3f})\t'
                         'Memory: {memory:.3f} ({cached_memory:.3f})\t'
                         'Loss: {loss.val:.4f} ({loss.avg:.4f})\t'
                         'Prec@1: {top1.val:.3f} ({top1.avg:.3f})\t'
                         'Prec@5: {top5.val:.3f} ({top5.avg:.3f})'.format(
-                        epoch, i, n, batch_time=batch_time,
+                        epoch, i, n, batch_time=batch_time, throughput=throughput,
                         epoch_time=epoch_time, full_epoch_time=full_epoch_time,
                         loss=losses, top1=top1, top5=top5,
                         memory=(float(torch.cuda.memory_allocated()) / 10**9),

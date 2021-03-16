@@ -141,6 +141,7 @@ class StageRuntime:
 
             # Now, use this mapping to determine the modules contained in
             # each stage.
+            print(rank_to_stage_map)
             assert 0 <= self.rank < len(rank_to_stage_map)
             self.num_ranks = len(rank_to_stage_map)
             self.num_stages = len(stage_to_module_map)
@@ -164,16 +165,22 @@ class StageRuntime:
             self.modules_with_dependencies = ModulesWithDependencies(
                 [model[module] for module in modules])
             self.is_criterion = self.stage == (self.num_stages - 1)
-            if stage_to_depth_map is not None:
-                self.num_warmup_minibatches = stage_to_depth_map[
-                    str(self.stage)]
-            else:
-                self.num_warmup_minibatches = self.num_ranks - 1
-                for i in range(self.stage):
-                    self.num_warmup_minibatches -= len(
-                        stage_to_rank_map[i])
-                self.num_warmup_minibatches = self.num_warmup_minibatches // \
-                    self.num_ranks_in_stage
+
+            ###
+            #stage_to_depth_map = {}
+            
+            self.num_warmup_minibatches = self.num_stages - self.stage - 1
+
+            # if stage_to_depth_map is not None:
+            #     self.num_warmup_minibatches = stage_to_depth_map[
+            #         str(self.stage)]
+            # else:
+            #     self.num_warmup_minibatches = self.num_ranks - 1
+            #     for i in range(self.stage):
+            #         self.num_warmup_minibatches -= len(
+            #             stage_to_rank_map[i])
+            #     self.num_warmup_minibatches = self.num_warmup_minibatches // \
+            #         self.num_ranks_in_stage
 
             # To determine where tensors should be sent and received, first
             # determine the "producing" and "consuming" module IDs of each

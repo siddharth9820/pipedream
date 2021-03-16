@@ -278,7 +278,7 @@ class GraphCreator(object):
             sub_module.forward = self.forward_original_methods[sub_module]
 
     def persist_graph(self, directory):
-        self.graph.to_dot(os.path.join(directory, "graph.dot"))
+        # self.graph.to_dot(os.path.join(directory, "graph.dot"))
         with open(os.path.join(directory, "graph.txt"), 'w') as f:
             f.write(str(self.graph))
         ### I have disabled this because of failing to meet the latex dependency 

@@ -182,7 +182,8 @@ class ImageNet_util(object):
 
     def get_model(self, arch):
         if args.arch.startswith('densenet'):
-            model = ImageNet.densenet.__dict__[arch]()
+            import models.ImageNet.densenet as densenet
+            model = densenet.__dict__[arch]()
         elif args.arch.startswith('inception_v3'):
             model = ImageNet.inception.__dict__[arch]()
         elif args.arch.startswith('mobilenet'):
@@ -190,7 +191,8 @@ class ImageNet_util(object):
         elif args.arch.startswith('nasnet'):
             model = ImageNet.nasnet.__dict__[arch]()
         elif args.arch.startswith('resnext'):
-            model = ImageNet.resnext.__dict__[arch]()
+            import models.ImageNet.resnext as resnext
+            model = resnext.__dict__[arch]()
         elif args.arch.startswith('squeezenet'):
             model = ImageNet.squeezenet.__dict__[arch]()
         elif args.arch.startswith('vgg'):
@@ -265,6 +267,92 @@ class LM_util(object):
         train_dataset = SyntheticDatasetLanguageModelling(50257, 256, 100)
         return train_dataset
 
+def profile_train(train_loader, model, criterion, optimizer):
+    batch_time_meter = AverageMeter()
+    data_time_meter = AverageMeter()
+    NUM_STEPS_TO_PROFILE = 100 # profile 100 steps or minibatches
+
+    # switch to train mode
+    model.train()
+
+    layer_timestamps = []
+    data_times = []
+
+    iteration_timestamps = []
+    opt_step_timestamps = []
+    data_timestamps = []
+    
+    start_time = time.time()
+    for i, (input, target) in enumerate(train_loader):
+        data_pid = os.getpid()
+        data_time = time.time() - start_time
+        data_time_meter.update(data_time)
+        with torchprofiler.Profiling(model, module_whitelist=[]) as p:
+            input = input.cuda(non_blocking=True)
+            target = target.cuda(non_blocking=True)
+            input.requires_grad=True
+            # compute output
+            output = model(input)
+            if isinstance(output, tuple):
+                loss = sum((criterion(output_elem, target) for output_elem in output))
+            else:
+                loss = criterion(output, target)
+
+            # compute gradient and do SGD step
+            optimizer.zero_grad()
+            try:
+                loss.backward()
+            except RuntimeError:
+                pass
+            optimizer_step_start = time.time()
+            optimizer.step()
+
+            end_time = time.time()
+            iteration_time = end_time - start_time
+            batch_time_meter.update(iteration_time)
+
+            if i >= NUM_STEPS_TO_PROFILE:
+                break
+        p_str = str(p)
+        layer_timestamps.append(p.processed_times())
+        data_times.append(data_time)
+
+        if args.verbose:
+            print('End-to-end time: {batch_time.val:.3f} s ({batch_time.avg:.3f} s)'.format(
+                  batch_time=batch_time_meter))
+
+        iteration_timestamps.append({"start": start_time * 1000 * 1000,
+                                     "duration": iteration_time * 1000 * 1000})
+        opt_step_timestamps.append({"start": optimizer_step_start * 1000 * 1000,
+                                    "duration": (end_time - optimizer_step_start) * 1000 * 1000, "pid": os.getpid()})
+        data_timestamps.append({"start":  start_time * 1000 * 1000,
+                                "duration": data_time * 1000 * 1000, "pid": data_pid})
+        
+        start_time = time.time()
+
+    layer_times = []
+    tot_accounted_time = 0.0
+    if args.verbose:
+        print("\n==========================================================")
+        print("Layer Type    Forward Time (ms)    Backward Time (ms)")
+        print("==========================================================")
+
+    for i in range(len(layer_timestamps[0])):
+        layer_type = str(layer_timestamps[0][i][0])
+        layer_forward_time_sum = 0.0
+        layer_backward_time_sum = 0.0
+        for j in range(len(layer_timestamps)):
+            layer_forward_time_sum += (layer_timestamps[j][i][2] / 1000)
+            layer_backward_time_sum += (layer_timestamps[j][i][5] / 1000)
+        layer_times.append((layer_type, layer_forward_time_sum / len(layer_timestamps),
+                                    layer_backward_time_sum / len(layer_timestamps)))
+        if args.verbose:
+            print(layer_times[-1][0], layer_times[-1][1], layer_times[-1][2])
+        tot_accounted_time += (layer_times[-1][1] + layer_times[-1][2])
+
+    print()
+    print("Total accounted time: %.3f ms" % tot_accounted_time)
+    return layer_times, (sum(data_times) * 1000.0) / len(data_times)
 
 def main():
     global args, best_prec1
@@ -320,7 +408,7 @@ def main():
     
     del model_input
     # print(summary)
-    model = model.cpu()
+    # model = model.cpu()
     print("Memory in bytes - " + str(torch.cuda.memory_allocated() ))
     
     
@@ -339,10 +427,44 @@ def main():
     data_time = (end_time - start_time)*1000/prof_num
     print("Data loading time..", data_time, "ms")
 
-    prof_num = 100
+    prof_num = 150
 
     output, target = next(iter(train_loader)) 
-     
+    print("Collecting profile...")
+    for i, (model_input, _) in enumerate(train_loader):
+        model_input = model_input.cuda()
+        if i >= 0:
+            break
+
+
+    summary = torchsummary.summary(model=model, module_whitelist=[], model_input=(model_input,),
+                                    verbose=args.verbose, device="cuda")
+    per_layer_times, data_time = profile_train(train_loader, model, criterion, optimizer)
+    summary_i = 0
+    per_layer_times_i = 0
+    while summary_i < len(summary) and per_layer_times_i < len(per_layer_times):
+        summary_elem = summary[summary_i]
+        per_layer_time = per_layer_times[per_layer_times_i]
+        if str(summary_elem['layer_name']) != str(per_layer_time[0]):
+            summary_elem['forward_time'] = 0.0
+            summary_elem['backward_time'] = 0.0
+            summary_i += 1
+            continue
+        summary_elem['forward_time'] = per_layer_time[1]
+        summary_elem['backward_time'] = per_layer_time[2]
+        summary_i += 1
+        per_layer_times_i += 1
+    summary.append(OrderedDict())
+    summary[-1]['layer_name'] = 'Input'
+    summary[-1]['forward_time'] = data_time
+    summary[-1]['backward_time'] = 0.0
+    summary[-1]['nb_params'] = 0.0
+    summary[-1]['output_shape'] = [args.batch_size] + list(model_input.size()[1:])
+    create_graph(model, train_loader, summary,
+                    os.path.join(args.profile_directory, args.arch))
+    print("...done!")
+    return
+    
     for layer_details in summary:
         layer = layer_details['layer_obj']
         input_ = output.detach() 
@@ -408,100 +530,6 @@ def main():
                     os.path.join(args.profile_directory, args.arch))
     print("...done!")
     return
-
-
-
-
-def profile_train(train_loader, model, criterion, optimizer, summary):
-    batch_time_meter = AverageMeter()
-    data_time_meter = AverageMeter()
-    NUM_STEPS_TO_PROFILE = 100  # profile 100 steps or minibatches
-
-    # switch to train mode
-    model.train()
-
-    layer_timestamps = []
-    data_times = []
-
-    iteration_timestamps = []
-    opt_step_timestamps = []
-    data_timestamps = []
-    
-    start_time = time.time()
-    print("In profile train")
-    for i, (input, target) in enumerate(train_loader):
-        data_pid = os.getpid()
-        data_time = time.time() - start_time
-        data_time_meter.update(data_time)
-        with torchprofiler.Profiling(model, module_whitelist=[]) as p:
-            print("========== BEGIN before sending input ===",torch.cuda.memory_allocated()/(1000000000))
-            print_gpu_tensors()
-            input = input.cuda()
-            target = target.cuda()
-            print("========== BEGIN after sending input ===",torch.cuda.memory_allocated()/(1000000000))
-            print_gpu_tensors()
-            # compute output
-            output = model(input)
-            del input
-            del target
-            del output
-            # if isinstance(output, tuple):
-            #     loss = sum((criterion(output_elem, target) for output_elem in output))
-            # else:
-            #     loss = criterion(output, target)
-
-            # compute gradient and do SGD step
-            # optimizer.zero_grad()
-            # loss.backward()
-            optimizer_step_start = time.time()
-            optimizer.step()
-
-            end_time = time.time()
-            iteration_time = end_time - start_time
-            batch_time_meter.update(iteration_time)
-
-            if i >= NUM_STEPS_TO_PROFILE:
-                break
-        p_str = str(p)
-        layer_timestamps.append(p.processed_times())
-        data_times.append(data_time)
-
-        if args.verbose:
-            print('End-to-end time: {batch_time.val:.3f} s ({batch_time.avg:.3f} s)'.format(
-                  batch_time=batch_time_meter))
-
-        iteration_timestamps.append({"start": start_time * 1000 * 1000,
-                                     "duration": iteration_time * 1000 * 1000})
-        opt_step_timestamps.append({"start": optimizer_step_start * 1000 * 1000,
-                                    "duration": (end_time - optimizer_step_start) * 1000 * 1000, "pid": os.getpid()})
-        data_timestamps.append({"start":  start_time * 1000 * 1000,
-                                "duration": data_time * 1000 * 1000, "pid": data_pid})
-        
-        start_time = time.time()
-
-    layer_times = []
-    tot_accounted_time = 0.0
-    if args.verbose:
-        print("\n==========================================================")
-        print("Layer Type    Forward Time (ms)    Backward Time (ms)")
-        print("==========================================================")
-
-    for i in range(len(layer_timestamps[0])):
-        layer_type = str(layer_timestamps[0][i][0])
-        layer_forward_time_sum = 0.0
-        layer_backward_time_sum = 0.0
-        for j in range(len(layer_timestamps)):
-            layer_forward_time_sum += (layer_timestamps[j][i][2] / 1000)
-            layer_backward_time_sum += (layer_timestamps[j][i][5] / 1000)
-        layer_times.append((layer_type, layer_forward_time_sum / len(layer_timestamps),
-                                    layer_backward_time_sum / len(layer_timestamps)))
-        if args.verbose:
-            print(layer_times[-1][0], layer_times[-1][1], layer_times[-1][2])
-        tot_accounted_time += (layer_times[-1][1] + layer_times[-1][2])
-
-    print()
-    print("Total accounted time: %.3f ms" % tot_accounted_time)
-    return layer_times, (sum(data_times) * 1000.0) / len(data_times)
 
 
 

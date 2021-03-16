@@ -36,14 +36,15 @@ class CommunicationHandler(object):
         self.fp16 = fp16
         assert num_ranks_in_server > 0
 
-        # Initialize the distributed environment.
-        os.environ['MASTER_ADDR'] = master_addr
-        os.environ['MASTER_PORT'] = str(master_port)
-        # torch_comm_file = os.path.join(os.getcwd(), "temp.txt")
-        # if rank == 0:
-        #     if os.path.exists(torch_comm_file):
-        #         os.remove(torch_comm_file)
+        torch_comm_file = os.path.join("/home/ssingh37/pipedream/scripts/mirrr")
+        os.environ["MASTER_PORT"]="9999"
+        os.environ["MASTER_ADDR"]=master_addr
+        #print(torch_comm_file)
+        #print(os.environ["GLOO_SOCKET_IFNAME"])
 
+        print("initializing process group; backend: %s, rank: %d, "
+              "world_size: %d" % (backend, rank, world_size))
+        
         dist.init_process_group(backend, rank=rank, world_size=world_size) #init_method='file://'+torch_comm_file)
         assert dist.get_world_size() == self.world_size
         print("Finished initializing process group; backend: %s, rank: %d, "
@@ -244,7 +245,7 @@ class CommunicationHandler(object):
             forward_num_iterations = 0
 
         if self.num_ranks_in_previous_stage > 0:
-            assert backward_num_iterations % self.num_ranks_in_previous_stage == 0
+            assert backward_num_iterations % self.num_ranks_in_previous_stage == 0, f"Num iterations {backward_num_iterations} ranks {self.num_ranks_in_previous_stage}"
             backward_num_iterations = backward_num_iterations // \
                 self.num_ranks_in_previous_stage
         else:
@@ -398,8 +399,10 @@ class CommunicationHandler(object):
         gathered_connection_list_sizes = [
             torch.ones_like(connection_list_size)
             for _ in range(self.world_size)]
+        print("Doing all gather")
         dist.all_gather(gathered_connection_list_sizes,
                         connection_list_size)
+        print("Done all gather")
         max_connection_list_size = max(
             gathered_connection_list_sizes)
 
