@@ -1,5 +1,10 @@
 #!/bin/bash
 
+
+RUN_PROFILE=1
+LANG_MOD=0
+CORRECT_OPTIM=0
+
 for ARGUMENT in "$@"
 do
     KEY=$(echo $ARGUMENT | cut -f1 -d=)
@@ -11,20 +16,25 @@ do
             DATASET_NAME)       DATASET_NAME=${VALUE} ;;
             DATASET_DIR)        DATASET_DIR=${VALUE} ;;
             RUN_PROFILE)        RUN_PROFILE=${VALUE} ;;
-            
+            LANG_MOD)           LANG_MOD=${VALUE} ;;
+            CORRECT_OPTIM)      CORRECT_OPTIM=${VALUE} ;;
             *)   
     esac    
 done
 
+ARGS="--lr 0.1 -j 32"
+if [ $LANG_MOD -eq 1 ];then
+    ARGS="--lr 0.001 --language_modelling -j 2"
+    export TOKENIZER_PARALLELISM=0
+fi
+
 PIPEDREAM_HOME="/home/ssingh37/pipedream"
-
-
 RUN_OPTIM=1
 
 ## Change this part ##
-BATCH_SIZE=64
+BATCH_SIZE=32
 INTRA_BW=200000000000
-INTER_BW=14000000000
+INTER_BW=25000000000
 GLOO_SOCKET_IFNAME=infinibond0
 IP=$(ip -4 addr show $GLOO_SOCKET_IFNAME | grep -oP "(?<=inet ).*(?=/)" 2>&1 | head -n 1)
 
@@ -95,7 +105,13 @@ fi
 if [ $RUN_OPTIM -eq 1 ];then
     echo "Running PipeDream Optimizer and generating pipedream model"
 
-    python optimizer_graph_hierarchical.py -n $NUM_GPUS_PER_NODE $NUM_NODES -f $PROFILE_OUTPUT_DIR/$ARCH/graph.txt -b $INTRA_BW $INTER_BW  -o ./$DATASET_NAME/$ARCH/$NUM_GPUS 
+    if [ $CORRECT_OPTIM -eq 0 ];then
+        echo "Using original optimizer"
+        python optimizer_graph_hierarchical.py -n $NUM_GPUS_PER_NODE $NUM_NODES -f $PROFILE_OUTPUT_DIR/$ARCH/graph.txt -b $INTRA_BW $INTER_BW  -o ./$DATASET_NAME/$ARCH/$NUM_GPUS
+    else 
+        echo "Using corrected optimizer"
+        python optimizer_graph_hierarchical_modified.py -n $NUM_GPUS_PER_NODE $NUM_NODES -f $PROFILE_OUTPUT_DIR/$ARCH/graph.txt -b $INTRA_BW $INTER_BW  -o ./$DATASET_NAME/$ARCH/$NUM_GPUS
+    fi 
 
     repl_factors=$(<./$DATASET_NAME/$ARCH/$NUM_GPUS/stage_to_num_ranks_map.txt)
 
@@ -109,7 +125,6 @@ if [ $RUN_OPTIM -eq 1 ];then
     
     
 fi
-
 
 if [ ! -f $MODEL_OUTPUT_DIR/hybrid_conf.json ]; then
     echo "Detected pure data parallelism configuration"
@@ -130,6 +145,8 @@ fi
 echo "Creating $LOG_DIR"
 mkdir -p $LOG_DIR
 
+
+
 if [ $MODE -eq 1 ]; then     
     echo "launching hybrid parallelism job"
     
@@ -138,7 +155,8 @@ if [ $MODE -eq 1 ]; then
         rm ./temp.txt
     fi 
 
-    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR  --num_ranks_in_server $NUM_GPUS_PER_NODE --world_size $NUM_GPUS --lr 0.1 -j 32 --log_dir $LOG_DIR #-s #--language_modelling
+    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR  --num_ranks_in_server $NUM_GPUS_PER_NODE --world_size $NUM_GPUS --log_dir $LOG_DIR --print-freq 10 $ARGS
+
 fi
 
 if [ $MODE -eq 2 ]; then 
@@ -149,8 +167,7 @@ if [ $MODE -eq 2 ]; then
         rm ./temp.txt
     fi 
 
-    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x NCCL_SOCKET_IFNAME=infinibond0 -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --data_prl --world_size $NUM_GPUS --num_ranks_in_server $NUM_GPUS_PER_NODE --lr 0.1 -j 32 --log_dir $LOG_DIR #--lr 0.001 --language_modelling
-    
+    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x NCCL_SOCKET_IFNAME=infinibond0 -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --data_prl --world_size $NUM_GPUS --num_ranks_in_server $NUM_GPUS_PER_NODE --log_dir $LOG_DIR --print-freq 10 --world_size $NUM_GPUS $ARGS
 fi
 
 

@@ -408,7 +408,7 @@ def main():
     
     del model_input
     # print(summary)
-    # model = model.cpu()
+    model = model.cpu()
     print("Memory in bytes - " + str(torch.cuda.memory_allocated() ))
     
     
@@ -431,39 +431,34 @@ def main():
 
     output, target = next(iter(train_loader)) 
     print("Collecting profile...")
-    for i, (model_input, _) in enumerate(train_loader):
-        model_input = model_input.cuda()
-        if i >= 0:
-            break
 
+    # summary = torchsummary.summary(model=model, module_whitelist=['CombinedEmbedding', 'TransformerEncoderLayerWithMask', 'FinalFCLayer'], model_input=(model_input,), verbose=args.verbose, device="cuda")
 
-    summary = torchsummary.summary(model=model, module_whitelist=[], model_input=(model_input,),
-                                    verbose=args.verbose, device="cuda")
-    per_layer_times, data_time = profile_train(train_loader, model, criterion, optimizer)
-    summary_i = 0
-    per_layer_times_i = 0
-    while summary_i < len(summary) and per_layer_times_i < len(per_layer_times):
-        summary_elem = summary[summary_i]
-        per_layer_time = per_layer_times[per_layer_times_i]
-        if str(summary_elem['layer_name']) != str(per_layer_time[0]):
-            summary_elem['forward_time'] = 0.0
-            summary_elem['backward_time'] = 0.0
-            summary_i += 1
-            continue
-        summary_elem['forward_time'] = per_layer_time[1]
-        summary_elem['backward_time'] = per_layer_time[2]
-        summary_i += 1
-        per_layer_times_i += 1
-    summary.append(OrderedDict())
-    summary[-1]['layer_name'] = 'Input'
-    summary[-1]['forward_time'] = data_time
-    summary[-1]['backward_time'] = 0.0
-    summary[-1]['nb_params'] = 0.0
-    summary[-1]['output_shape'] = [args.batch_size] + list(model_input.size()[1:])
-    create_graph(model, train_loader, summary,
-                    os.path.join(args.profile_directory, args.arch))
-    print("...done!")
-    return
+    # per_layer_times, data_time = profile_train(train_loader, model, criterion, optimizer)
+    # summary_i = 0
+    # per_layer_times_i = 0
+    # while summary_i < len(summary) and per_layer_times_i < len(per_layer_times):
+    #     summary_elem = summary[summary_i]
+    #     per_layer_time = per_layer_times[per_layer_times_i]
+    #     if str(summary_elem['layer_name']) != str(per_layer_time[0]):
+    #         summary_elem['forward_time'] = 0.0
+    #         summary_elem['backward_time'] = 0.0
+    #         summary_i += 1
+    #         continue
+    #     summary_elem['forward_time'] = per_layer_time[1]
+    #     summary_elem['backward_time'] = per_layer_time[2]
+    #     summary_i += 1
+    #     per_layer_times_i += 1
+    # summary.append(OrderedDict())
+    # summary[-1]['layer_name'] = 'Input'
+    # summary[-1]['forward_time'] = data_time
+    # summary[-1]['backward_time'] = 0.0
+    # summary[-1]['nb_params'] = 0.0
+    # summary[-1]['output_shape'] = [args.batch_size] + list(model_input.size()[1:])
+    # create_graph(model, train_loader, summary,
+    #                 os.path.join(args.profile_directory, args.arch))
+    # print("...done!")
+    # return
     
     for layer_details in summary:
         layer = layer_details['layer_obj']

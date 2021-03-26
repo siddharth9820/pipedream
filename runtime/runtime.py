@@ -169,18 +169,18 @@ class StageRuntime:
             ###
             #stage_to_depth_map = {}
             
-            self.num_warmup_minibatches = self.num_stages - self.stage - 1
+            #self.num_warmup_minibatches = self.num_stages - self.stage - 1
 
-            # if stage_to_depth_map is not None:
-            #     self.num_warmup_minibatches = stage_to_depth_map[
-            #         str(self.stage)]
-            # else:
-            #     self.num_warmup_minibatches = self.num_ranks - 1
-            #     for i in range(self.stage):
-            #         self.num_warmup_minibatches -= len(
-            #             stage_to_rank_map[i])
-            #     self.num_warmup_minibatches = self.num_warmup_minibatches // \
-            #         self.num_ranks_in_stage
+            if stage_to_depth_map is not None:
+                self.num_warmup_minibatches = stage_to_depth_map[
+                    str(self.stage)]
+            else:
+                self.num_warmup_minibatches = self.num_ranks - 1
+                for i in range(self.stage):
+                    self.num_warmup_minibatches -= len(
+                        stage_to_rank_map[i])
+                self.num_warmup_minibatches = self.num_warmup_minibatches // \
+                    self.num_ranks_in_stage
 
             # To determine where tensors should be sent and received, first
             # determine the "producing" and "consuming" module IDs of each

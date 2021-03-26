@@ -528,6 +528,7 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths, writer=None):
     if model_type == runtime.IMAGE_CLASSIFICATION:
         top1 = AverageMeter()
         top5 = AverageMeter()
+    temp_batch_time = AverageMeter()
 
     # switch to train mode
     n = r.num_iterations(loader_size=lengths[0])
@@ -573,24 +574,25 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths, writer=None):
 
             losses.update(loss.item(), output.size(0))
             batch_time.update(time.time() - end)
-            
-            throughput = r.num_ranks_in_stage*(1/batch_time.avg) 
-            
+            temp_batch_time.update(time.time() - end)
+
+            tput = r.num_ranks_in_stage*(1/batch_time.val)
             if writer and (r.rank_in_stage==0):
                 n_iter = i
                 writer.add_scalar(f'Loss/train', loss.item(), n_iter)
-                writer.add_scalar(f'Perf/avg_throughput', throughput, n_iter)
+                writer.add_scalar(f'Perf/avg_throughput', tput, n_iter)
 
             # measure elapsed time
             end = time.time()
             epoch_time = (end - epoch_start_time) / 3600.0
             full_epoch_time = (epoch_time / (float(i+1)+num_warmup_minibatches)) * float(n) #changed
 
-            if i % args.print_freq == 0:      
+            if i % args.print_freq == 0:
+                throughput = r.num_ranks_in_stage*(1/temp_batch_time.avg)
                 if model_type == runtime.IMAGE_CLASSIFICATION:
                     print('Epoch: [{0}][{1}/{2}]\t'
                         'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                        'Throughput: ({throughput:.3f})\t'
+                        'Throughput: {throughput:.3f}\t'
                         'Epoch time [hr]: {epoch_time:.3f} ({full_epoch_time:.3f})\t'
                         'Memory: {memory:.3f} ({cached_memory:.3f})\t'
                         'Loss: {loss.val:.4f} ({loss.avg:.4f})\t'
@@ -604,16 +606,17 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths, writer=None):
                 else:
                     print('Epoch: [{0}][{1}/{2}]\t'
                         'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                        'Throughput: {throughput:.3f}\t'
                         'Epoch time [hr]: {epoch_time:.3f} ({full_epoch_time:.3f})\t'
                         'Memory: {memory:.3f} ({cached_memory:.3f})\t'
                         'Loss: {loss.val:.4f} ({loss.avg:.4f})\t'
                         'Perplexity: {latest_perp:.3f} ({avg_perp:.3f})'.format(
                         epoch, i, n, batch_time=batch_time,
                         epoch_time=epoch_time, full_epoch_time=full_epoch_time,
-                        loss=losses, latest_perp = np.exp(losses.val), avg_perp = np.exp(losses.avg),
+                        loss=losses, latest_perp = np.exp(losses.val), avg_perp = np.exp(losses.avg), throughput=throughput,
                         memory=(float(torch.cuda.memory_allocated()) / 10**9),
                         cached_memory=(float(torch.cuda.memory_cached()) / 10**9)))
-
+                temp_batch_time.reset()
                 import sys; sys.stdout.flush()
         else:
             pass

@@ -19,3 +19,4 @@ optimizer/ImageNet/
 *.error
 *.txt
 optimizer/alexnet
+logs/

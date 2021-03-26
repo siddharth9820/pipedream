@@ -399,10 +399,9 @@ class CommunicationHandler(object):
         gathered_connection_list_sizes = [
             torch.ones_like(connection_list_size)
             for _ in range(self.world_size)]
-        print("Doing all gather")
+        
         dist.all_gather(gathered_connection_list_sizes,
                         connection_list_size)
-        print("Done all gather")
         max_connection_list_size = max(
             gathered_connection_list_sizes)
 

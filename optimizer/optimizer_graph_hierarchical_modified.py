@@ -319,14 +319,14 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         new_splits = []
         stage_id = 0
         new_rfs = []
-        for (start, end) in splits:
+        for split_no, (start, end) in enumerate(splits):
             partial_splits, replication_factors = \
                 analyze_partitioning(all_As[i], states, start, end,
                                      network_bandwidths[i], all_num_machines[i],
                                      activation_compression_ratio,
                                      print_configuration, verbose)
             start_point = start
-            replication_factors = [x*prev_rfs[stage_id] for x in replication_factors]
+            replication_factors = [x*prev_rfs[split_no] for x in replication_factors]
             new_rfs += replication_factors
 
             print("Replication factors : ",replication_factors)
@@ -395,7 +395,24 @@ def main(all_num_machines, profile_filename, network_bandwidths, memory_size,
         with open(os.path.join(output_directory, "layer_to_stage_map.json"), "w") as f:
             json.dump(layer_to_stage_map, f, indent=2)
         
-       
+        next_worker = 0
+        stage_to_gpus = {}
+        num_stages = len(stage_to_num_ranks_map)
+        num_layers = len(layer_to_stage_map)
+        for stage in range(num_stages):
+            num_ranks = stage_to_num_ranks_map[stage]
+            stage_to_gpus[stage] = list(range(next_worker, next_worker+num_ranks))
+            next_worker += num_ranks
+
+        myelin_map = np.zeros((num_layers, next_worker), dtype=np.int)
+        for layer_id, stage in layer_to_stage_map.items():
+            n = len(stage_to_gpus[stage])
+            for j in range(next_worker):
+                myelin_map[layer_id, j] = stage_to_gpus[stage][j%n]
+
+        print(myelin_map)
+        print(os.path.join(output_directory, "myelin_config.txt"))
+        np.savetxt(os.path.join(output_directory, "myelin_config.txt"), myelin_map)
 
     total_time = states[-1].compute_time
     total_parameter_size = states[-1].parameter_size
