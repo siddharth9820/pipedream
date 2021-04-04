@@ -24,7 +24,7 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-import torchvision.models as models
+import torchvision
 
 import models
 
@@ -136,7 +136,7 @@ best_prec1 = 0
 def create_graph(model, train_loader, summary, directory):
     """Given a model, creates and visualizes the computation DAG
        of the model in the passed-in directory."""
-    graph_creator = torchgraph.GraphCreator(model, summary, module_whitelist=['CombinedEmbedding', 'TransformerEncoderLayerWithMask', 'FinalFCLayer'])
+    graph_creator = torchgraph.GraphCreator(model, summary, module_whitelist=['CombinedEmbedding', 'TransformerEncoderLayerWithMask', 'FinalFCLayer', 'Bottleneck'])
     graph_creator.hook_modules(model)
     for i, (input, target) in enumerate(train_loader):
         input = input.cuda(non_blocking=True)
@@ -203,6 +203,9 @@ class ImageNet_util(object):
             model = alexnet.__dict__[arch]()
         elif args.arch.startswith('lenet'):
             model = ImageNet.lenet.__dict__[arch]()
+        elif args.arch.startswith("resnet"):
+            import models.ImageNet.resnet as resnet 
+            model = resnet.__dict__[arch]()
         else:
             print("Architecture in Imagenet not found.. aborting")
             exit(-1)
@@ -264,7 +267,10 @@ class LM_util(object):
         return model 
 
     def get_dataset(self, arch, data_dir=None):
-        train_dataset = SyntheticDatasetLanguageModelling(50257, 256, 100)
+        if arch == 'gpt2_small':
+            train_dataset = SyntheticDatasetLanguageModelling(50257, 256, 100)
+        elif arch == 'gpt2_medium':
+            train_dataset = SyntheticDatasetLanguageModelling(50257, 128, 100)
         return train_dataset
 
 def profile_train(train_loader, model, criterion, optimizer):
@@ -404,12 +410,12 @@ def main():
         ip_size = model_input.size()
         if i >= 0:
             break
-    summary = torchsummary.summary(model=model, module_whitelist=['CombinedEmbedding', 'TransformerEncoderLayerWithMask', 'FinalFCLayer'], model_input=(model_input,), verbose=args.verbose, device="cuda")
+    summary = torchsummary.summary(model=model, module_whitelist=['CombinedEmbedding', 'TransformerEncoderLayerWithMask', 'FinalFCLayer', 'Bottleneck'], model_input=(model_input,), verbose=args.verbose, device="cuda")
     
     del model_input
     # print(summary)
     model = model.cpu()
-    print("Memory in bytes - " + str(torch.cuda.memory_allocated() ))
+    print("Memory in bytes - " + str(torch.cuda.memory_allocated()))
     
     
     prof_num = 100

@@ -11,6 +11,7 @@ sys.path.append("..")
 sys.path.append("../profiler/image_classification")
 import graph
 import models.language_modelling.transformer as transformer_layers
+import models.ImageNet.resnet as resnet
 import torch
 
 declaration_whitelist = [
@@ -92,9 +93,10 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
                                model_template_filename, output_filename):
     model_template = open(model_template_filename, 'r').read()
     nodes = graph.topological_sort()
-    f = "../../profiler/image_classification/models/language_modelling"
+    f1 = "../../profiler/image_classification/models/language_modelling"
+    f2 = "../../profiler/image_classification/models/ImageNet"
     import_statements = [
-        f"import sys \nsys.path.insert(0, \"{f}\")\nimport transformer as transformer_layers" 
+        f"import sys \nsys.path.insert(0, \"{f1}\")\nimport transformer as transformer_layers\n \nsys.path.insert(0, \"{f2}\")\nimport resnet\n" 
         
         ]
 
@@ -128,15 +130,22 @@ def convert_subgraph_to_module(graph, full_graph, num_subgraphs, module_name, in
         output_name = "out%d" % counter
         # layer_declaration = "torch.nn.%s" % (
         #     node.node_desc.replace("inplace", "inplace=True"))
-        if "ReLU" in node.node_desc:
-            node.node_desc = "ReLU(inplace=False)"
-        if hasattr(torch.nn, node.node_desc[:node.node_desc.find('(')]):
+        print("=== ",node.node_desc[:node.node_desc.find('(')])
+        in_resnet = hasattr(resnet, node.node_desc[:node.node_desc.find('(')])
+        if in_resnet:
+            layer_declaration = "resnet.%s" %(node.node_desc)
+            print("found ", node.node_desc[:node.node_desc.find('(')], "in resnet")
+        elif hasattr(torch.nn, node.node_desc[:node.node_desc.find('(')]):
             layer_declaration = "torch.nn.%s" % (node.node_desc)
+            print("found in torch.nn")
         elif hasattr(transformer_layers, node.node_desc[:node.node_desc.find('(')]):
             layer_declaration = "transformer_layers.%s" %(node.node_desc)
+            print("found in transformer layers")
+        
         elif node.node_desc.startswith("Input"):
             layer_declaration = "torch.nn.%s" % (node.node_desc)
         else:
+            print("not found ", node.node_desc[:node.node_desc.find('(')], "anywhere")
             print(node.node_desc)
             exit(-1)
         layer_names[node.node_id] = layer_name

@@ -11,6 +11,7 @@ import sys
 import time
 
 import torch
+torch.autograd.set_detect_anomaly(True)
 from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.parallel
@@ -397,13 +398,14 @@ def main():
         if args.synthetic_data:
             val_dataset = SyntheticDatasetImageClassification((3, 224, 224), 10000)
         else:
-            valdir = os.path.join(args.data_dir, 'val')
-            val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                normalize,
-            ]))
+            # valdir = os.path.join(args.data_dir, 'val')
+            # val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
+            #     transforms.Resize(256),
+            #     transforms.CenterCrop(224),
+            #     transforms.ToTensor(),
+            #     normalize,
+            # ]))
+            val_dataset = SyntheticDatasetImageClassification((3, 224, 224), 10000)
     
     elif args.dataset_name == "MNIST":
         train_dataset = datasets.MNIST(
@@ -430,8 +432,8 @@ def main():
     elif args.dataset_name in args.dataset_name in ["wikitext-2", "wikitext-103"]:
         tokenizer = transformers.GPT2TokenizerFast.from_pretrained('gpt2')
         if not args.synthetic_data:
-            train_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'train', num_workers=1, bptt_len=args.bptt_len)
-            val_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'validation', num_workers=1, bptt_len=args.bptt_len)
+            train_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'train', num_workers=1, bptt_len=args.bptt_len, cache_dir=args.data_dir)
+            val_dataset = huggingface.get_dataset(args.dataset_name, tokenizer, 'validation', num_workers=1, bptt_len=args.bptt_len, cache_dir=args.data_dir)
         else:
             if args.dataset_name == "wikitext-2":
                 train_length = 36718

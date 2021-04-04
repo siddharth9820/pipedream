@@ -52,7 +52,8 @@ def get_dataset(name, tokenizer, split='train[:20%]', cache_dir=None, num_worker
         num_proc=num_workers,
         load_from_cache_file=True,
         remove_columns=encoded_dataset.column_names,
-        batch_size = 2000
+        batch_size = 2000,
+        keep_in_memory=True
     )
     
     lm_dataset.set_format(type='torch', columns=['src', 'trg'])

@@ -1,6 +1,5 @@
 #!/bin/bash
-
-
+source ~/.bashrc
 RUN_PROFILE=1
 LANG_MOD=0
 CORRECT_OPTIM=0
@@ -22,17 +21,34 @@ do
     esac    
 done
 
-ARGS="--lr 0.1 -j 32"
-if [ $LANG_MOD -eq 1 ];then
-    ARGS="--lr 0.001 --language_modelling -j 2"
-    export TOKENIZER_PARALLELISM=0
+ARGS="--lr 0.1 -j 4"
+USE_SSD=1
+if [ $ARCH == "gpt2_small" ];then
+    ARGS="--lr 0.001 --language_modelling -j 0 --bptt-len 256"
+    BATCH_SIZE=32
+    DATASET_DIR="/raid/scratch/huggingface"
+elif [ $ARCH == "gpt2_medium" ];then 
+    ARGS="--lr 0.001 --language_modelling -j 0 --bptt-len 128"
+    BATCH_SIZE=32
+    DATASET_DIR="/raid/scratch/huggingface"
+elif [ $ARCH == "vgg16" ];then 
+    ARGS="--lr 0.01  -j 4"
+    BATCH_SIZE=64
+    if [ $USE_SSD -eq 1 ];then
+        export USE_SSD=1
+        export TRAIN_TAR_FILE="$DATASET_DIR/ILSVRC2012_img_train.tar"
+        export SSD_DIR="/raid/scratch"
+        export DATASET_DIR=$DATASET_DIR
+        # mpirun -n $NUM_NODES -npernode 1 -x PATH -hostfile $COBALT_NODEFILE -bind-to none -map-by slot -x DATASET_DIR -x TRAIN_TAR_FILE -x SSD_DIR -x USE_SSD bash copy_to_ssd.sh
+        DATASET_DIR=$SSD_DIR/imagenet
+    fi
 fi
+    
 
 PIPEDREAM_HOME="/home/ssingh37/pipedream"
 RUN_OPTIM=1
 
 ## Change this part ##
-BATCH_SIZE=32
 INTRA_BW=200000000000
 INTER_BW=25000000000
 GLOO_SOCKET_IFNAME=infinibond0
@@ -51,7 +67,6 @@ echo
 echo "============================================================"
 echo "The following stuff is hardcoded (unfortunately!) in the bash script:"
 echo "Bandwidths: (Intra Node) : $intra GBPS (Inter Node) : $inter GBPS"
-echo "Batch Size = $BATCH_SIZE"
 echo "Using $GLOO_SOCKET_IFNAME IP - $IP socket for gloo P2P inter-node communication"
 echo "If any of these values are wrong, please modify them in the bash script"
 echo "============================================================"
@@ -121,6 +136,8 @@ if [ $RUN_OPTIM -eq 1 ];then
 
     # ## STEP 3 - Convert output of optimizer into a pytorch model
     rm -rf $MODEL_OUTPUT_DIR/*
+
+    echo "generating model"
     python convert_graph_to_model.py -n $NUM_GPUS -f ./$DATASET_NAME/$ARCH/$NUM_GPUS/gpus=$NUM_GPUS.txt --stage_to_num_ranks_map $repl_factors -n $ARCH -a $ARCH -o $MODEL_OUTPUT_DIR
     
     
@@ -133,8 +150,6 @@ fi
 
 ## STEP 4 - Execute runtime
 cd $PIPEDREAM_HOME/runtime/image_classification
-
-
 
 
 if [ -d $LOG_DIR ]; then
@@ -155,8 +170,7 @@ if [ $MODE -eq 1 ]; then
         rm ./temp.txt
     fi 
 
-    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR  --num_ranks_in_server $NUM_GPUS_PER_NODE --world_size $NUM_GPUS --log_dir $LOG_DIR --print-freq 10 $ARGS
-
+    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/hybrid_conf.json --distributed_backend gloo --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR  --num_ranks_in_server $NUM_GPUS_PER_NODE --world_size $NUM_GPUS --log_dir $LOG_DIR --print-freq 10 $ARGS 
 fi
 
 if [ $MODE -eq 2 ]; then 
@@ -167,7 +181,7 @@ if [ $MODE -eq 2 ]; then
         rm ./temp.txt
     fi 
 
-    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x NCCL_SOCKET_IFNAME=infinibond0 -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --data_prl --world_size $NUM_GPUS --num_ranks_in_server $NUM_GPUS_PER_NODE --log_dir $LOG_DIR --print-freq 10 --world_size $NUM_GPUS $ARGS
+    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x NCCL_SOCKET_IFNAME=infinibond0 -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --data_prl --world_size $NUM_GPUS --num_ranks_in_server $NUM_GPUS_PER_NODE --log_dir $LOG_DIR --print-freq 10 --world_size $NUM_GPUS $ARGS 
 fi
 
 
