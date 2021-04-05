@@ -450,10 +450,10 @@ def main():
         if num_ranks_in_first_stage > 1:
             train_sampler = torch.utils.data.distributed.DistributedSampler(
                 train_dataset, num_replicas=num_ranks_in_first_stage,
-                rank=args.rank)
+                rank=args.rank%num_ranks_in_first_stage)
             val_sampler = torch.utils.data.distributed.DistributedSampler(
                 val_dataset, num_replicas=num_ranks_in_first_stage,
-                rank=args.rank)
+                rank=args.rank%num_ranks_in_first_stage)
             distributed_sampler = True
 
     print("initialising data loaders")

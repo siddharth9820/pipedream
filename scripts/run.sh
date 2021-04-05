@@ -39,7 +39,7 @@ elif [ $ARCH == "vgg16" ];then
         export TRAIN_TAR_FILE="$DATASET_DIR/ILSVRC2012_img_train.tar"
         export SSD_DIR="/raid/scratch"
         export DATASET_DIR=$DATASET_DIR
-        # mpirun -n $NUM_NODES -npernode 1 -x PATH -hostfile $COBALT_NODEFILE -bind-to none -map-by slot -x DATASET_DIR -x TRAIN_TAR_FILE -x SSD_DIR -x USE_SSD bash copy_to_ssd.sh
+        mpirun -n $NUM_NODES -npernode 1 -x PATH -hostfile $COBALT_NODEFILE -bind-to none -map-by slot -x DATASET_DIR -x TRAIN_TAR_FILE -x SSD_DIR -x USE_SSD bash copy_to_ssd.sh
         DATASET_DIR=$SSD_DIR/imagenet
     fi
 fi

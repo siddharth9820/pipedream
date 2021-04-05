@@ -169,7 +169,7 @@ class StageRuntime:
             ###
             #stage_to_depth_map = {}
             
-            #self.num_warmup_minibatches = self.num_stages - self.stage - 1
+            self.num_warmup_minibatches = self.num_stages - self.stage - 1
 
             if stage_to_depth_map is not None:
                 self.num_warmup_minibatches = stage_to_depth_map[

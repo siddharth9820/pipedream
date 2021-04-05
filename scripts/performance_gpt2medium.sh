@@ -1,4 +1,4 @@
-ARGS="ARGS=gpt2_medium DATASET_NAME=wikitext-103 LANG_MOD=1 DATASET_DIR=/lus/theta-fs0/projects/CharmRTS/charmnn/huggingface/ RUN_PROFILE=0 CORRECT_OPTIM=0"
+ARGS="ARCH=gpt2_medium DATASET_NAME=wikitext-103 LANG_MOD=1 DATASET_DIR=/lus/theta-fs0/projects/CharmRTS/charmnn/huggingface/ RUN_PROFILE=0 CORRECT_OPTIM=0"
 # 64  GPUs
 qsub -t 100 -n 8 -A CharmRTS --mode script run.sh NUM_GPUS_PER_NODE=8 NUM_NODES=8 $ARGS
 # 32  GPUs
