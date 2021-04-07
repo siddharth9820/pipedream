@@ -398,14 +398,15 @@ def main():
         if args.synthetic_data:
             val_dataset = SyntheticDatasetImageClassification((3, 224, 224), 10000)
         else:
-            # valdir = os.path.join(args.data_dir, 'val')
-            # val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
-            #     transforms.Resize(256),
-            #     transforms.CenterCrop(224),
-            #     transforms.ToTensor(),
-            #     normalize,
-            # ]))
-            val_dataset = SyntheticDatasetImageClassification((3, 224, 224), 10000)
+            valdir = os.path.join(args.data_dir, 'val')
+            val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
+                transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+                
+            ]))
+            # val_dataset = SyntheticDatasetImageClassification((3, 224, 224), 10000)
     
     elif args.dataset_name == "MNIST":
         train_dataset = datasets.MNIST(
@@ -462,7 +463,7 @@ def main():
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=args.eval_batch_size, shuffle=False,
+        val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=True)
     
     print(f"Rank {args.rank}: Length of train loader: {len(train_loader)} Length of dataset: {len(train_dataset)} BPTT_LEN {args.bptt_len} BATCH SIZE {args.batch_size}")
@@ -474,21 +475,36 @@ def main():
     #     lengths = torch.LongTensor([len(train_loader), len(val_loader)]).cuda()
     # else:
     #     lengths = torch.zeros((2)).long().cuda()
-    # dist.broadcast(lengths, src=0)
+    
 
     lengths = torch.LongTensor([len(train_loader), len(val_loader)])
 
-    quantities = [len(configuration_maps['stage_to_rank_map'][0])]
-    for i in range(len(configuration_maps['stage_to_rank_map']) - 1):
-        curr = len(configuration_maps['stage_to_rank_map'][i])
-        curr *= len(configuration_maps['stage_to_rank_map'][i+1])
-        quantities.append(curr)
-    print(quantities)
-    lcm = np.lcm.reduce(quantities)
-    print(f"new length should be a multiple of {lcm}")
-    old_length = lengths[0].item()
-    lengths[0] = (lengths[0] // lcm) * lcm
-    print(f"Old length {old_length} Adjusted Length {lengths[0]}")
+    if rank == 0:
+        quantities = [len(configuration_maps['stage_to_rank_map'][0])]
+        for i in range(len(configuration_maps['stage_to_rank_map']) - 1):
+            curr = len(configuration_maps['stage_to_rank_map'][i])
+            curr *= len(configuration_maps['stage_to_rank_map'][i+1])
+            quantities.append(curr)
+        print(quantities)
+        lcm = np.lcm.reduce(quantities)
+        print(f"new length should be a multiple of {lcm}")
+        old_length = lengths[0].item()
+        lengths[0] = (lengths[0] // lcm) * lcm
+        print(f"Rank {args.rank} : Old Train length {old_length} Adjusted Length {lengths[0]}")
+        old_length = lengths[1].item()
+        lengths[1] = (lengths[1] // lcm) * lcm
+        print(f"Rank {args.rank} Old Val length {old_length} Adjusted Length {lengths[1]}")
+        dist.broadcast(lengths, src=0)
+    else:
+        dist.broadcast(lengths, src=0)
+        num_ranks_in_first_stage = len(configuration_maps['stage_to_rank_map'][0])
+        lengths[0] *= num_ranks_in_first_stage
+        lengths[1] *= num_ranks_in_first_stage
+        lengths[0] = lengths[0] // r.num_ranks_in_stage
+        lengths[1] = lengths[1] // r.num_ranks_in_stage
+        train_len = lengths[0]
+        val_len = lengths[1]
+        print(f"rank {args.rank}, Adjusted train length {train_len}, Adjusted val length {val_len}")
 
     #exit()
     # if checkpoint is loaded, start by running validation
@@ -507,7 +523,7 @@ def main():
             train(train_loader, r, optimizer, epoch, model_type, lengths, writer)
 
             # evaluate on validation set
-            # prec1 = validate(val_loader, r, epoch)
+            prec1 = validate(val_loader, r, epoch, lengths, model_type)
             # if r.stage != r.num_stages: prec1 = 0
 
             # # remember best prec@1 and save checkpoint
@@ -533,9 +549,12 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths, writer=None):
     temp_batch_time = AverageMeter()
 
     # switch to train mode
-    n = r.num_iterations(loader_size=lengths[0])
-    if args.num_minibatches is not None:
-        n = min(n, args.num_minibatches)
+    
+    # n = r.num_iterations(loader_size=lengths[0].item())
+    # print("====== ",lengths[0].item(), " ====",n)
+    # if args.num_minibatches is not None:
+    #     n = min(n, args.num_minibatches)
+    n = lengths[0]
     r.train(n)
     if not is_first_stage(): train_loader = None
     r.set_loader(train_loader)
@@ -659,16 +678,18 @@ def train(train_loader, r, optimizer, epoch, model_type, lengths, writer=None):
     print("Epoch start time: %.3f, epoch end time: %.3f" % (epoch_start_time, time.time()))
 
 
-def validate(val_loader, r, epoch):
+def validate(val_loader, r, epoch, num_iters, model_type):
     batch_time = AverageMeter()
     losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
+    if model_type == runtime.IMAGE_CLASSIFICATION:
+        top1 = AverageMeter()
+        top5 = AverageMeter()
 
     # switch to evaluate mode
-    n = r.num_iterations(loader_size=len(val_loader))
-    if args.num_minibatches is not None:
-        n = min(n, args.num_minibatches)
+    # n = r.num_iterations(loader_size=num_iters[1])
+    # if args.num_minibatches is not None:
+    #     n = min(n, args.num_minibatches)
+    n = num_iters[1]
     r.eval(n)
     if not is_first_stage(): val_loader = None
     r.set_loader(val_loader)
@@ -681,9 +702,9 @@ def validate(val_loader, r, epoch):
     else:
         num_warmup_minibatches = r.num_warmup_minibatches
 
-    if args.verbose_frequency > 0:
-        print("Letting in %d warm-up minibatches" % num_warmup_minibatches)
-        print("Running validation for %d minibatches" % n)
+    #if args.verbose_frequency > 0:
+    print("Letting in %d warm-up minibatches" % num_warmup_minibatches)
+    print("Running validation for %d minibatches" % n)
 
     with torch.no_grad():
         for i in range(num_warmup_minibatches):
@@ -698,31 +719,35 @@ def validate(val_loader, r, epoch):
                 output, target, loss = r.output, r.target, r.loss
 
                 # measure accuracy and record loss
-                prec1, prec5 = accuracy(output, target, topk=(1, 5))
                 losses.update(loss.item(), output.size(0))
-                top1.update(prec1[0], output.size(0))
-                top5.update(prec5[0], output.size(0))
+  
+                if model_type == runtime.IMAGE_CLASSIFICATION:
+                    prec1, prec5 = accuracy(output, target, topk=(1, 5))
+                    top1.update(prec1[0], output.size(0))
+                    top5.update(prec5[0], output.size(0))
 
                 # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
 
                 if i % args.print_freq == 0:
-                    print('Test: [{0}][{1}/{2}]\t'
-                          'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                          'Memory: {memory:.3f} ({cached_memory:.3f})\t'
-                          'Loss: {loss.val:.4f} ({loss.avg:.4f})\t'
-                          'Prec@1: {top1.val:.3f} ({top1.avg:.3f})\t'
-                          'Prec@5: {top5.val:.3f} ({top5.avg:.3f})'.format(
-                           epoch, i, n, batch_time=batch_time, loss=losses,
-                           top1=top1, top5=top5,
-                           memory=(float(torch.cuda.memory_allocated()) / 10**9),
-                           cached_memory=(float(torch.cuda.memory_cached()) / 10**9)))
-                    import sys; sys.stdout.flush()
+                    if model_type == runtime.IMAGE_CLASSIFICATION:
+                        print('Test: [{0}][{1}/{2}]\t'
+                            'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                            'Memory: {memory:.3f} ({cached_memory:.3f})\t'
+                            'Loss: {loss.val:.4f} ({loss.avg:.4f})\t'
+                            'Prec@1: {top1.val:.3f} ({top1.avg:.3f})\t'
+                            'Prec@5: {top5.val:.3f} ({top5.avg:.3f})'.format(
+                            epoch, i, n, batch_time=batch_time, loss=losses,
+                            top1=top1, top5=top5,
+                            memory=(float(torch.cuda.memory_allocated()) / 10**9),
+                            cached_memory=(float(torch.cuda.memory_cached()) / 10**9)))
+                        import sys; sys.stdout.flush()
 
         if is_last_stage():
-            print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
-              .format(top1=top1, top5=top5))
+            if model_type == runtime.IMAGE_CLASSIFICATION:
+                print('******** Epoch [{0}] Validation Loss {losses.avg:.3f}  Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
+              .format(epoch, losses=losses,top1=top1, top5=top5))
 
         for i in range(num_warmup_minibatches):
              r.run_ack()

@@ -39,7 +39,9 @@ elif [ $ARCH == "vgg16" ];then
         export TRAIN_TAR_FILE="$DATASET_DIR/ILSVRC2012_img_train.tar"
         export SSD_DIR="/raid/scratch"
         export DATASET_DIR=$DATASET_DIR
-        mpirun -n $NUM_NODES -npernode 1 -x PATH -hostfile $COBALT_NODEFILE -bind-to none -map-by slot -x DATASET_DIR -x TRAIN_TAR_FILE -x SSD_DIR -x USE_SSD bash copy_to_ssd.sh
+        export VAL_PREP_SCRIPT_PATH="/home/ssingh37/parallel-dl-scripts/ddp/imagenet_scripts/valprep.sh"
+        export VAL_TAR_FILE="/lus/theta-fs0/projects/CharmRTS/charmnn/imagenet/ILSVRC2012_img_val.tar.1"
+        mpirun -n $NUM_NODES -npernode 1 -x PATH -hostfile $COBALT_NODEFILE -bind-to none -map-by slot -x DATASET_DIR -x TRAIN_TAR_FILE -x SSD_DIR -x USE_SSD -x VAL_TAR_FILE -x VAL_PREP_SCRIPT_PATH bash copy_to_ssd.sh
         DATASET_DIR=$SSD_DIR/imagenet
     fi
 fi
@@ -181,7 +183,7 @@ if [ $MODE -eq 2 ]; then
         rm ./temp.txt
     fi 
 
-    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x NCCL_SOCKET_IFNAME=infinibond0 -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --data_prl --world_size $NUM_GPUS --num_ranks_in_server $NUM_GPUS_PER_NODE --log_dir $LOG_DIR --print-freq 10 --world_size $NUM_GPUS $ARGS 
+    mpirun -npernode $NUM_GPUS_PER_NODE --cpus-per-proc 16 -n $NUM_GPUS -x PATH -x NCCL_SOCKET_IFNAME=infinibond0 -x GLOO_SOCKET_IFNAME=infinibond0 -hostfile $COBALT_NODEFILE python main_with_runtime.py --master_addr $IP --module models.$DATASET_NAME.$ARCH.$NUM_GPUS -b $BATCH_SIZE --config_path $MODEL_OUTPUT_DIR/dp_conf.json --distributed_backend nccl --no_input_pipelining --dataset-name $DATASET_NAME  --data-dir $DATASET_DIR --data_prl --world_size $NUM_GPUS --num_ranks_in_server $NUM_GPUS_PER_NODE --log_dir $LOG_DIR --print-freq 10 --world_size $NUM_GPUS $ARGS --epochs 90 
 fi
 
 
