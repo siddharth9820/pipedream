@@ -40,7 +40,7 @@ print(tensor.shape, tensor.nelement(), tensor.element_size())
 if args.backend == 'gloo':
     print("Testing gloo backend...")
     print("Testing P2P operations.. only supports synchronous communication between cpu tensors")
-    tensor = tensor.cpu()   
+    # tensor = tensor.cpu()   
     torch_comm_file = os.path.join(os.getcwd(), "temp.txt")
     if rank==0:
         if os.path.exists(torch_comm_file):
@@ -64,13 +64,13 @@ if args.backend == 'gloo':
 
             st = time.time()
             
-            dist.send(tensor=tensor, dst=1, tag=2*at)
+            dist.broadcast(tensor=tensor, src=0)
             
             if args.test_correctness:
                 tensor.zero_()
             
             wait_st = time.time()
-            dist.recv(tensor=tensor, src=1, tag=2*at+1)
+            dist.broadcast(tensor=tensor, src=1)
             wait_en = time.time()
             
             
@@ -85,8 +85,8 @@ if args.backend == 'gloo':
             print(f"Bandwidth = {2*tensor_size(tensor)/time_taken/(1e9)} GBPS | Data Send {tensor_size(tensor)/1e9} GB")
             #time.sleep(2)
         else:
-            dist.recv(tensor=tensor,src=0,tag=2*at)
-            dist.send(tensor=tensor,dst=0,tag=2*at+1)
+            dist.broadcast(tensor=tensor,src=0)
+            dist.broadcast(tensor=tensor,src=1)
 elif args.backend=='mpi':
     torch.cuda.set_device(local_rank)
     tensor = tensor.cuda()
